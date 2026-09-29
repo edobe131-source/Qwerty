@@ -65,7 +65,7 @@
     return [Math.max(1, Math.round(longSide * rw / rh)), longSide];
   }
 
-  // ================= 펜 종류 =================
+  // ================= 펜 / 도구 / 도형 종류 =================
   const PENS = [
     { id: 'basic', label: '기본 펜', size: 8 },
     { id: 'brush', label: '붓펜', size: 16 },
@@ -80,10 +80,33 @@
   const TOOLS = {
     pen: '펜',
     magic: '매직 펜',
+    shape: '도형',
+    curve: '곡선',
+    guide: '가상 선',
+    fill: '채우기',
     eraser: '지우개',
+    blur: '흐림',
     select: '영역 선택',
     paste: '붙여넣기',
+    underlay: '밑그림',
   };
+
+  const SHAPES = [
+    { id: 'rect', label: '사각형' },
+    { id: 'roundrect', label: '둥근 사각형' },
+    { id: 'ellipse', label: '타원' },
+    { id: 'triangle', label: '삼각형' },
+    { id: 'diamond', label: '마름모' },
+    { id: 'pentagon', label: '오각형' },
+    { id: 'hexagon', label: '육각형' },
+    { id: 'star', label: '별' },
+    { id: 'line', label: '직선' },
+    { id: 'arrow', label: '화살표' },
+    { id: 'polygon', label: '다각형' },
+  ];
+
+  // 레이어 지우개는 크기 조절 없이 화면 기준으로 항상 같은 크기
+  const LAYER_ERASER_PX = 12;
 
   // ================= 홈 화면 =================
   const home = $('#home');
@@ -236,7 +259,7 @@
     const now = Date.now();
     const p = {
       id: uid(),
-      version: 2,
+      version: 3,
       name,
       width: size[0],
       height: size[1],
@@ -252,10 +275,10 @@
   });
 
   function newBoard(id, type, name) {
-    return { id, type, name, layers: [], nextNum: 1, nextGroup: 1, view: null };
+    return { id, type, name, layers: [], underlays: [], underlayOpacity: 0.5, counters: {}, nextNum: 1, nextGroup: 1, view: null };
   }
 
-  // 예전 형식(선 목록) 프로젝트를 레이어 트리 형식으로 바꿈
+  // 예전 형식 프로젝트를 지금 형식으로 바꿈
   function migrate(p) {
     for (const b of p.boards) {
       if (!b.layers) {
@@ -263,8 +286,11 @@
         delete b.strokes;
       }
       if (!b.nextGroup) b.nextGroup = 1;
+      if (!b.underlays) b.underlays = [];
+      if (b.underlayOpacity == null) b.underlayOpacity = 0.5;
+      if (!b.counters) b.counters = {};
     }
-    p.version = 2;
+    p.version = 3;
     return p;
   }
 
@@ -274,12 +300,15 @@
   const ctx = canvas.getContext('2d');
   const cache = document.createElement('canvas');
   const cctx = cache.getContext('2d');
+  const ucanvas = document.createElement('canvas'); // 밑그림 합성용
+  const uctx = ucanvas.getContext('2d');
   const scratch = document.createElement('canvas');
   const sctx = scratch.getContext('2d');
 
   const PAGE_BG = '#e4e4e9';
   const AUX_BG = '#f7f7f4';
   const ACCENT = '#4f5bd5';
+  const GUIDE_COLOR = '#12a3c9';
   const MIN_ZOOM = 0.02;
   const MAX_ZOOM = 40;
 
@@ -292,6 +321,14 @@
     eraserMode: 'area',
     eraserSize: 30,
     selectMode: 'lasso',
+    guideMode: 'line',
+    shape: 'rect',
+    shapeFilled: false,
+    shapeSquare: false,
+    noise: 0,
+    curveFilled: false,
+    blurSize: 40,
+    blurStrength: 8,
     ...savedTool,
     penSizes: { ...penDefaults, ...(savedTool.penSizes || {}) },
   };
@@ -312,58 +349,88 @@
   let selection = new Set();
   let selBox = null; // { cx, cy, hw, hh, angle }
 
+  // 여러 번 눌러 만드는 도형 (다각형 / 베지에 곡선)
+  let polyDraft = null;  // { pts:[{x,y}], seed }
+  let curveDraft = null; // { anchors:[{x,y,hx,hy}] }
+
   // 그리는 중에만 쓰는 임시 상태
   const live = { hidden: new Set(), erase: null, transform: null };
 
-  // 저장하지 않는 런타임 캐시 (선 객체는 바뀌지 않으므로 객체 기준으로 캐시)
+  // 저장하지 않는 런타임 캐시 (레이어 객체는 바뀌지 않으므로 객체 기준으로 캐시)
   const bboxCache = new WeakMap();
   const thumbCache = new WeakMap();
 
   let clipboard = storage.get(CLIP_KEY, []);
 
   // ================= 레이어 트리 도우미 =================
-  // 노드: { kind:'stroke', ... } 또는 { kind:'group', children:[...] }
-  // 선 노드는 한 번 만들어지면 바꾸지 않고 새 객체로 교체한다 (실행 취소 스냅샷 공유를 위해)
+  // 레이어 종류(kind):
+  //   stroke 선 / fill 채우기 면 / guide 가상 선 / blur 흐림 영역 / image 이미지 / group 그룹
+  // board.layers 는 그림, board.underlays 는 밑그림(맨 아래, 반투명, 다운로드 안 됨)
+  // 그룹이 아닌 레이어 객체는 만들어진 뒤 바꾸지 않고 새 객체로 교체한다 (실행 취소 스냅샷 공유)
 
-  function locate(id, list = board.layers, parent = null) {
+  function roots() {
+    return [board.layers, board.underlays];
+  }
+
+  function locateIn(id, list, parent) {
     for (let i = 0; i < list.length; i++) {
       const n = list[i];
       if (n.id === id) return { node: n, list, index: i, parent };
       if (n.kind === 'group') {
-        const r = locate(id, n.children, n);
+        const r = locateIn(id, n.children, n);
         if (r) return r;
       }
     }
     return null;
   }
 
-  function pathTo(id, list = board.layers, trail = []) {
+  function locate(id) {
+    for (const list of roots()) {
+      const r = locateIn(id, list, null);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  function pathIn(id, list, trail) {
     for (const n of list) {
       if (n.id === id) return [...trail, n];
       if (n.kind === 'group') {
-        const r = pathTo(id, n.children, [...trail, n]);
+        const r = pathIn(id, n.children, [...trail, n]);
         if (r) return r;
       }
     }
     return null;
   }
 
-  function strokesOf(node, out = [], visibleOnly = false) {
+  function pathTo(id) {
+    for (const list of roots()) {
+      const r = pathIn(id, list, []);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  function isUnderlay(id) {
+    return !!locateIn(id, board.underlays, null);
+  }
+
+  function leavesOf(node, out = [], visibleOnly = false) {
     if (visibleOnly && !node.visible) return out;
-    if (node.kind === 'group') for (const c of node.children) strokesOf(c, out, visibleOnly);
+    if (node.kind === 'group') for (const c of node.children) leavesOf(c, out, visibleOnly);
     else out.push(node);
     return out;
   }
 
-  function allStrokes(visibleOnly = true) {
+  function allLeaves(visibleOnly = true) {
     const out = [];
-    for (const n of board.layers) strokesOf(n, out, visibleOnly);
+    for (const n of board.layers) leavesOf(n, out, visibleOnly);
     return out;
   }
 
-  function countNodes(list) {
+  function countLeaves(list) {
     let n = 0;
-    for (const x of list) n += x.kind === 'group' ? countNodes(x.children) : 1;
+    for (const x of list) n += x.kind === 'group' ? countLeaves(x.children) : 1;
     return n;
   }
 
@@ -376,6 +443,7 @@
         if (n.kind === 'group') walk(n.children);
       }
     };
+    walk(board.underlays);
     walk(board.layers);
     return map;
   }
@@ -400,44 +468,14 @@
         }
       }
     };
-    prune(board.layers);
+    for (const list of roots()) prune(list);
   }
 
-  function nodeBBox(node) {
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const s of strokesOf(node)) {
-      const b = strokeBBox(s);
-      x0 = Math.min(x0, b[0]); y0 = Math.min(y0, b[1]);
-      x1 = Math.max(x1, b[2]); y1 = Math.max(y1, b[3]);
-    }
-    return [x0, y0, x1, y1];
-  }
-
-  function nodesBBox(nodes) {
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const n of nodes) {
-      const b = nodeBBox(n);
-      x0 = Math.min(x0, b[0]); y0 = Math.min(y0, b[1]);
-      x1 = Math.max(x1, b[2]); y1 = Math.max(y1, b[3]);
-    }
-    return [x0, y0, x1, y1];
-  }
-
-  function strokeBBox(s) {
-    let bb = bboxCache.get(s);
-    if (bb) return bb;
-    const p = s.points;
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (let i = 0; i < p.length; i += 2) {
-      if (p[i] < x0) x0 = p[i];
-      if (p[i] > x1) x1 = p[i];
-      if (p[i + 1] < y0) y0 = p[i + 1];
-      if (p[i + 1] > y1) y1 = p[i + 1];
-    }
-    const h = s.size / 2 + 1;
-    bb = [x0 - h, y0 - h, x1 + h, y1 + h];
-    bboxCache.set(s, bb);
-    return bb;
+  function nextName(prefix) {
+    if (prefix === '선') return '선 ' + board.nextNum++;
+    const c = board.counters;
+    c[prefix] = (c[prefix] || 0) + 1;
+    return `${prefix} ${c[prefix]}`;
   }
 
   // ================= 기하 도우미 =================
@@ -465,19 +503,6 @@
     );
   }
 
-  // 선(stroke)이 선분 a-b에서 tol 거리 안에 있는가
-  function strokeNearSegment(s, ax, ay, bx, by, tol) {
-    const bb = strokeBBox(s);
-    if (Math.max(ax, bx) < bb[0] - tol || Math.min(ax, bx) > bb[2] + tol ||
-        Math.max(ay, by) < bb[1] - tol || Math.min(ay, by) > bb[3] + tol) return false;
-    const p = s.points;
-    if (p.length === 2) return distPtSeg(p[0], p[1], ax, ay, bx, by) <= tol;
-    for (let i = 0; i < p.length - 2; i += 2) {
-      if (segSegDist(p[i], p[i + 1], p[i + 2], p[i + 3], ax, ay, bx, by) <= tol) return true;
-    }
-    return false;
-  }
-
   function pointInPoly(x, y, poly) {
     let inside = false;
     for (let i = 0, j = poly.length - 2; i < poly.length; j = i, i += 2) {
@@ -487,14 +512,107 @@
     return inside;
   }
 
-  function strokeInPoly(s, poly, pb) {
-    const bb = strokeBBox(s);
-    if (bb[2] < pb[0] || bb[0] > pb[2] || bb[3] < pb[1] || bb[1] > pb[3]) return false;
-    const p = s.points;
-    for (let i = 0; i < p.length; i += 2) if (pointInPoly(p[i], p[i + 1], poly)) return true;
+  function imageCorners(n) {
+    const co = Math.cos(n.angle || 0), si = Math.sin(n.angle || 0);
+    const hw = n.w / 2, hh = n.h / 2;
+    const out = [];
+    for (const [u, v] of [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]) out.push(n.cx + u * co - v * si, n.cy + u * si + v * co);
+    return out;
+  }
+
+  // 레이어가 채우는 다각형들 (채우기 면, 이미지)
+  function areaPolys(n) {
+    if (n.kind === 'fill') return n.paths;
+    if (n.kind === 'image') return [imageCorners(n)];
+    return null;
+  }
+
+  function pointInArea(x, y, polys) {
+    let inside = false;
+    for (const p of polys) if (pointInPoly(x, y, p)) inside = !inside;
+    return inside;
+  }
+
+  function leafBBox(n) {
+    let bb = bboxCache.get(n);
+    if (bb) return bb;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const scan = p => {
+      for (let i = 0; i < p.length; i += 2) {
+        if (p[i] < x0) x0 = p[i];
+        if (p[i] > x1) x1 = p[i];
+        if (p[i + 1] < y0) y0 = p[i + 1];
+        if (p[i + 1] > y1) y1 = p[i + 1];
+      }
+    };
+    const polys = areaPolys(n);
+    let h = 0;
+    if (polys) polys.forEach(scan);
+    else { scan(n.points); h = (n.size || 0) / 2 + 1; }
+    bb = [x0 - h, y0 - h, x1 + h, y1 + h];
+    bboxCache.set(n, bb);
+    return bb;
+  }
+
+  function nodeBBox(node) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const s of leavesOf(node)) {
+      const b = leafBBox(s);
+      x0 = Math.min(x0, b[0]); y0 = Math.min(y0, b[1]);
+      x1 = Math.max(x1, b[2]); y1 = Math.max(y1, b[3]);
+    }
+    return [x0, y0, x1, y1];
+  }
+
+  function nodesBBox(nodes) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const n of nodes) {
+      const b = nodeBBox(n);
+      x0 = Math.min(x0, b[0]); y0 = Math.min(y0, b[1]);
+      x1 = Math.max(x1, b[2]); y1 = Math.max(y1, b[3]);
+    }
+    return [x0, y0, x1, y1];
+  }
+
+  // 레이어가 선분 a-b 에서 tol 거리 안에 닿는가
+  function leafNearSegment(n, ax, ay, bx, by, tol) {
+    const bb = leafBBox(n);
+    if (Math.max(ax, bx) < bb[0] - tol || Math.min(ax, bx) > bb[2] + tol ||
+        Math.max(ay, by) < bb[1] - tol || Math.min(ay, by) > bb[3] + tol) return false;
+    const polys = areaPolys(n);
+    if (polys) {
+      if (pointInArea(ax, ay, polys) || pointInArea(bx, by, polys)) return true;
+      for (const p of polys) {
+        for (let i = 0, j = p.length - 2; i < p.length; j = i, i += 2) {
+          if (segSegDist(p[j], p[j + 1], p[i], p[i + 1], ax, ay, bx, by) <= tol) return true;
+        }
+      }
+      return false;
+    }
+    const p = n.points;
+    const t = tol + (n.size || 0) / 2;
+    if (p.length === 2) return distPtSeg(p[0], p[1], ax, ay, bx, by) <= t;
     for (let i = 0; i < p.length - 2; i += 2) {
-      for (let j = 0, k = poly.length - 2; j < poly.length; k = j, j += 2) {
-        if (segsIntersect(p[i], p[i + 1], p[i + 2], p[i + 3], poly[k], poly[k + 1], poly[j], poly[j + 1])) return true;
+      if (segSegDist(p[i], p[i + 1], p[i + 2], p[i + 3], ax, ay, bx, by) <= t) return true;
+    }
+    return false;
+  }
+
+  function leafInPoly(n, poly, pb) {
+    const bb = leafBBox(n);
+    if (bb[2] < pb[0] || bb[0] > pb[2] || bb[3] < pb[1] || bb[1] > pb[3]) return false;
+    const polys = areaPolys(n);
+    const lists = polys || [n.points];
+    for (const p of lists) {
+      for (let i = 0; i < p.length; i += 2) if (pointInPoly(p[i], p[i + 1], poly)) return true;
+    }
+    if (polys && pointInArea(poly[0], poly[1], polys)) return true;
+    for (const p of lists) {
+      const closed = !!polys;
+      for (let i = closed ? 0 : 2, j = closed ? p.length - 2 : 0; i < p.length; j = i, i += 2) {
+        for (let a = 0, b = poly.length - 2; a < poly.length; b = a, a += 2) {
+          if (segsIntersect(p[j], p[j + 1], p[i], p[i + 1], poly[b], poly[b + 1], poly[a], poly[a + 1])) return true;
+        }
       }
     }
     return false;
@@ -528,7 +646,15 @@
       n.children = n.children.map(c => transformNode(c, m));
       return n;
     }
-    const s = { ...n, points: transformPoints(n.points, m), size: round2(n.size * k) };
+    if (n.kind === 'image') {
+      const [cx, cy] = Mat.apply(m, n.cx, n.cy);
+      return { ...n, cx: round1(cx), cy: round1(cy), w: round1(n.w * k), h: round1(n.h * k), angle: round2((n.angle || 0) + rot) };
+    }
+    const s = { ...n };
+    if (n.points) s.points = transformPoints(n.points, m);
+    if (n.paths) s.paths = n.paths.map(p => transformPoints(p, m));
+    if (n.size != null) s.size = round2(n.size * k);
+    if (n.strength != null) s.strength = round2(n.strength * k);
     if (n.erase) s.erase = n.erase.map(e => ({ size: round2(e.size * k), points: transformPoints(e.points, m) }));
     if (n.pen === 'calligraphy') s.nib = round2((n.nib ?? NIB_ANGLE) + rot);
     return s;
@@ -555,6 +681,7 @@
   }
 
   function closeProject() {
+    finishDrafts();
     cancelActive();
     closePopups();
     saveProject();
@@ -577,7 +704,7 @@
     if (!project) return;
     const ok = storage.set(projectKey(project.id), project);
     writeIndex(project, makeProjectThumb());
-    if (!ok) toast('저장 공간이 부족해 저장하지 못했어요');
+    if (!ok) toast('저장 공간이 부족해 저장하지 못했어요 (밑그림 이미지가 크면 줄여 주세요)', 4000);
   }
 
   function writeIndex(p, thumb) {
@@ -598,7 +725,7 @@
     x.fillStyle = '#fff';
     x.fillRect(0, 0, c.width, c.height);
     x.scale(scale, scale);
-    drawNodes(x, main.layers, null);
+    drawNodes(x, main.layers, null, 'export');
     try { return c.toDataURL('image/jpeg', 0.8); } catch { return null; }
   }
 
@@ -616,6 +743,7 @@
 
   // ================= 캔버스(보드) =================
   function setBoard(b) {
+    if (board) finishDrafts();
     cancelActive();
     closePopups();
     board = b;
@@ -628,6 +756,7 @@
     updateHistoryButtons();
     updateSelectionUI();
     updateZoomLabel();
+    if (tool.current === 'underlay') buildContextBar();
     $('#board-badge').textContent = board.type === 'main'
       ? `기본 캔버스 · ${project.width} × ${project.height}`
       : '보조 캔버스 · 무한';
@@ -652,7 +781,7 @@
   }
 
   function removeAuxBoard(b) {
-    if (b.layers.length && !confirm(`'${b.name}'을(를) 삭제할까요? 그린 선도 함께 사라져요.`)) return;
+    if ((b.layers.length || b.underlays.length) && !confirm(`'${b.name}'을(를) 삭제할까요? 그린 것도 함께 사라져요.`)) return;
     project.boards = project.boards.filter(x => x !== b);
     histories.delete(b.id);
     markChanged();
@@ -692,8 +821,20 @@
     tabs.querySelector('.tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
-  // ================= 선 그리기 (펜 종류별) =================
+  // ================= 레이어 그리기 =================
   const patternCache = new Map();
+  const imageCache = new Map();
+
+  function getImage(src) {
+    let img = imageCache.get(src);
+    if (!img) {
+      img = new Image();
+      img.onload = () => { invalidate(); renderLayers(); };
+      img.src = src;
+      imageCache.set(src, img);
+    }
+    return img.complete && img.naturalWidth ? img : null;
+  }
 
   // 연필 질감: 색마다 한 번 만든 노이즈 무늬
   function pencilTexture(color) {
@@ -729,22 +870,43 @@
     c.lineTo(p[p.length - 2], p[p.length - 1]);
   }
 
-  // 투명도/합성 없이 선 모양만 그림
-  function drawStrokeRaw(c, s) {
-    const pen = s.pen || 'basic';
+  function tracePolys(c, polys) {
+    for (const p of polys) {
+      c.moveTo(p[0], p[1]);
+      for (let i = 2; i < p.length; i += 2) c.lineTo(p[i], p[i + 1]);
+      c.closePath();
+    }
+  }
+
+  // 투명도/합성 없이 모양만 그림
+  function drawRaw(c, n) {
+    if (n.kind === 'fill') {
+      c.fillStyle = n.color;
+      c.beginPath();
+      tracePolys(c, n.paths);
+      c.fill('evenodd');
+      return;
+    }
+    if (n.kind === 'image') {
+      const img = getImage(n.src);
+      if (!img) return;
+      c.save();
+      c.translate(n.cx, n.cy);
+      c.rotate(n.angle || 0);
+      c.drawImage(img, -n.w / 2, -n.h / 2, n.w, n.h);
+      c.restore();
+      return;
+    }
+    const pen = n.pen || 'basic';
     c.lineCap = 'round';
     c.lineJoin = 'round';
-    if (pen === 'brush' && s.w) return drawVariable(c, s);
-    if (pen === 'calligraphy') return drawCalligraphy(c, s);
-    if (pen === 'pencil') {
-      c.strokeStyle = c.createPattern(pencilTexture(s.color), 'repeat');
-    } else {
-      c.strokeStyle = s.color;
-    }
+    if (pen === 'brush' && n.w) return drawVariable(c, n);
+    if (pen === 'calligraphy') return drawCalligraphy(c, n);
+    c.strokeStyle = pen === 'pencil' ? c.createPattern(pencilTexture(n.color), 'repeat') : n.color;
     if (pen === 'highlighter') c.lineCap = 'square';
-    c.lineWidth = s.size;
+    c.lineWidth = n.size;
     c.beginPath();
-    tracePath(c, s.points);
+    tracePath(c, n.points);
     c.stroke();
   }
 
@@ -809,21 +971,21 @@
   }
 
   // 투명도, 합성, 영역 지우개 구멍까지 적용해서 그림
-  function drawStroke(c, s, extraErase) {
-    const def = PEN[s.pen] || PEN.basic;
-    const erases = extraErase ? [...(s.erase || []), extraErase] : s.erase;
-    if (erases && erases.length) { drawErased(c, s, def, erases); return; }
+  function drawVisible(c, n, extraErase) {
+    const def = n.kind === 'stroke' ? (PEN[n.pen] || PEN.basic) : {};
+    const erases = extraErase ? [...(n.erase || []), extraErase] : n.erase;
+    if (erases && erases.length) { drawErased(c, n, def, erases); return; }
     c.save();
     if (def.alpha) c.globalAlpha *= def.alpha;
     if (def.blend) c.globalCompositeOperation = def.blend;
-    drawStrokeRaw(c, s);
+    drawRaw(c, n);
     c.restore();
   }
 
   // 지운 부분은 흰색으로 덮는 게 아니라 진짜로 투명하게 뚫음 (destination-out)
-  function drawErased(c, s, def, erases) {
+  function drawErased(c, n, def, erases) {
     const t = c.getTransform();
-    const b = strokeBBox(s);
+    const b = leafBBox(n);
     let dx0 = Infinity, dy0 = Infinity, dx1 = -Infinity, dy1 = -Infinity;
     for (const [x, y] of [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]]) {
       const X = t.a * x + t.c * y + t.e, Y = t.b * x + t.d * y + t.f;
@@ -842,7 +1004,7 @@
     sctx.globalCompositeOperation = 'source-over';
     sctx.clearRect(0, 0, rw, rh);
     sctx.setTransform(t.a, t.b, t.c, t.d, t.e - rx, t.f - ry);
-    drawStrokeRaw(sctx, s);
+    drawRaw(sctx, n);
     sctx.globalCompositeOperation = 'destination-out';
     sctx.strokeStyle = '#000';
     sctx.lineCap = 'round';
@@ -862,15 +1024,123 @@
     c.restore();
   }
 
+  // 가상 선: 작업 화면에서만 점선으로 보이고 저장 이미지엔 안 나옴
+  function drawGuide(c, n, mode) {
+    if (mode === 'export') return;
+    const t = c.getTransform();
+    const sc = Math.hypot(t.a, t.b) || 1;
+    c.save();
+    c.strokeStyle = GUIDE_COLOR;
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    if (mode === 'thumb') {
+      c.lineWidth = 2 / sc;
+    } else {
+      c.lineWidth = 1.6 * dpr / sc;
+      c.setLineDash([7 * dpr / sc, 5 * dpr / sc]);
+    }
+    c.beginPath();
+    tracePath(c, n.points);
+    c.stroke();
+    c.restore();
+  }
+
+  // ----- 흐림 -----
+  const blurA = document.createElement('canvas');
+  const blurB = document.createElement('canvas');
+  const blurM = document.createElement('canvas');
+  const canFilter = (() => {
+    try {
+      const x = document.createElement('canvas').getContext('2d');
+      if (typeof x.filter !== 'string') return false;
+      x.filter = 'blur(2px)';
+      return x.filter === 'blur(2px)';
+    } catch { return false; }
+  })();
+
+  // 흐림 레이어: 그 아래에 이미 그려진 것을 칠한 영역만큼 흐리게
+  function applyBlur(c, n) {
+    const t = c.getTransform();
+    const sc = Math.hypot(t.a, t.b) || 1;
+    const sigma = n.strength * sc;
+    if (sigma < 0.3 || !n.points.length) return;
+    const b = leafBBox(n);
+    const m = n.strength * 3;
+    let dx0 = Infinity, dy0 = Infinity, dx1 = -Infinity, dy1 = -Infinity;
+    for (const [x, y] of [[b[0] - m, b[1] - m], [b[2] + m, b[1] - m], [b[0] - m, b[3] + m], [b[2] + m, b[3] + m]]) {
+      const X = t.a * x + t.c * y + t.e, Y = t.b * x + t.d * y + t.f;
+      dx0 = Math.min(dx0, X); dy0 = Math.min(dy0, Y); dx1 = Math.max(dx1, X); dy1 = Math.max(dy1, Y);
+    }
+    const rx = Math.max(0, Math.floor(dx0)), ry = Math.max(0, Math.floor(dy0));
+    const rw = Math.min(c.canvas.width, Math.ceil(dx1)) - rx;
+    const rh = Math.min(c.canvas.height, Math.ceil(dy1)) - ry;
+    if (rw <= 0 || rh <= 0 || rw * rh > 16e6) return;
+
+    for (const cv of [blurA, blurB, blurM]) { cv.width = rw; cv.height = rh; }
+    const a = blurA.getContext('2d'), bx = blurB.getContext('2d'), mx = blurM.getContext('2d');
+    a.drawImage(c.canvas, rx, ry, rw, rh, 0, 0, rw, rh);
+    if (canFilter) {
+      bx.filter = `blur(${sigma}px)`;
+      bx.drawImage(blurA, 0, 0);
+      bx.filter = 'none';
+    } else {
+      bx.putImageData(window.Raster.blurImageData(a.getImageData(0, 0, rw, rh), sigma), 0, 0);
+    }
+    // 칠한 영역 마스크 (가장자리를 살짝 부드럽게)
+    mx.setTransform(t.a, t.b, t.c, t.d, t.e - rx, t.f - ry);
+    mx.strokeStyle = '#000';
+    mx.lineCap = 'round';
+    mx.lineJoin = 'round';
+    mx.lineWidth = n.size;
+    mx.beginPath();
+    tracePath(mx, n.points);
+    mx.stroke();
+    bx.globalCompositeOperation = 'destination-in';
+    bx.drawImage(blurM, 0, 0);
+    // 원본 × (1 - 마스크) + 흐린 것 × 마스크 (가장자리에 이음매가 안 생기게 더하기로 합성)
+    a.globalCompositeOperation = 'destination-out';
+    a.drawImage(blurM, 0, 0);
+    a.globalCompositeOperation = 'lighter';
+    a.drawImage(blurB, 0, 0);
+    a.globalCompositeOperation = 'source-over';
+
+    c.save();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.clearRect(rx, ry, rw, rh);
+    c.globalAlpha = 1;
+    c.globalCompositeOperation = 'source-over';
+    c.drawImage(blurA, 0, 0, rw, rh, rx, ry, rw, rh);
+    c.restore();
+  }
+
+  function drawBlurMask(c, n) {
+    c.save();
+    c.strokeStyle = 'rgba(80, 140, 255, .45)';
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    c.lineWidth = n.size;
+    c.beginPath();
+    tracePath(c, n.points);
+    c.stroke();
+    c.restore();
+  }
+
+  // mode: 'editor' 작업 화면 / 'export' 저장 이미지 / 'thumb' 레이어 미리보기
+  function drawLeaf(c, n, extraErase, mode) {
+    if (n.kind === 'guide') drawGuide(c, n, mode);
+    else if (n.kind === 'blur') { if (mode === 'thumb') drawBlurMask(c, n); else applyBlur(c, n); }
+    else drawVisible(c, n, extraErase);
+  }
+
   // 레이어 트리 그리기 (뒤 → 앞)
-  function drawNodes(c, nodes, lv) {
+  function drawNodes(c, nodes, lv, mode) {
     for (const n of nodes) {
       if (!n.visible) continue;
       if (lv && lv.hidden.has(n.id)) continue;
       const m = lv && lv.transform && lv.transform.ids.has(n.id) ? lv.transform.m : null;
       if (m) { c.save(); c.transform(...m); }
-      if (n.kind === 'group') drawNodes(c, n.children, lv);
-      else drawStroke(c, n, lv && lv.erase && lv.erase.strokes.has(n.id) ? lv.erase.path : null);
+      if (n.kind === 'group') drawNodes(c, n.children, lv, mode);
+      else drawLeaf(c, n, lv && lv.erase && lv.erase.strokes.has(n.id) ? lv.erase.path : null, mode);
       if (m) c.restore();
     }
   }
@@ -883,7 +1153,7 @@
     dpr = Math.min(window.devicePixelRatio || 1, 3);
     cw = r.width;
     ch = r.height;
-    for (const c of [canvas, cache]) {
+    for (const c of [canvas, cache, ucanvas]) {
       c.width = Math.round(cw * dpr);
       c.height = Math.round(ch * dpr);
     }
@@ -951,7 +1221,21 @@
       applyView(c);
     }
 
-    drawNodes(c, board.layers, live);
+    // 밑그림: 따로 그린 뒤 투명도를 한 번에 적용 (겹친 부분이 진해지지 않게)
+    if (board.underlays.some(n => n.visible)) {
+      uctx.setTransform(1, 0, 0, 1, 0, 0);
+      uctx.clearRect(0, 0, ucanvas.width, ucanvas.height);
+      applyView(uctx);
+      drawNodes(uctx, board.underlays, live, 'editor');
+      c.save();
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.globalAlpha = board.underlayOpacity;
+      c.drawImage(ucanvas, 0, 0);
+      c.restore();
+    }
+
+    drawNodes(c, board.layers, live, 'editor');
+    if (active && active.kind === 'blurpaint') applyBlur(c, active.node);
 
     if (board.type === 'main') {
       c.strokeStyle = 'rgba(20, 20, 40, .22)';
@@ -984,12 +1268,73 @@
     c.stroke();
   }
 
+  function screenDot(c, x, y, r, fill) {
+    c.beginPath();
+    c.arc(x, y, r, 0, Math.PI * 2);
+    c.fillStyle = fill;
+    c.fill();
+    c.stroke();
+  }
+
   function drawOverlay(c) {
     const v = board.view;
 
-    if (active && active.kind === 'draw') {
+    // 그리는 중인 레이어 미리보기
+    if (active && active.preview) {
       applyView(c);
-      drawStroke(c, active.stroke);
+      drawLeaf(c, active.preview, null, 'editor');
+    }
+
+    // 다각형 만드는 중
+    if (polyDraft && polyDraft.pts.length) {
+      const pts = polyDraft.pts;
+      const hv = hover && !(active && active.kind === 'polypt') ? toWorld(...hover) : null;
+      const node = draftPolygonNode(hv);
+      applyView(c);
+      if (node) drawLeaf(c, node, null, 'editor');
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.save();
+      c.strokeStyle = ACCENT;
+      c.lineWidth = 1.5;
+      pts.forEach((p, i) => {
+        const [x, y] = toScreen(p.x, p.y);
+        screenDot(c, x, y, i === 0 && pts.length >= 3 ? 7 : 4.5, i === 0 ? ACCENT : '#fff');
+      });
+      c.restore();
+    }
+
+    // 베지에 곡선 만드는 중
+    if (curveDraft && curveDraft.anchors.length) {
+      const A = curveDraft.anchors;
+      const hv = hover && !active ? toWorld(...hover) : null;
+      const node = draftCurveNode(false, hv);
+      applyView(c);
+      if (node) drawLeaf(c, node, null, 'editor');
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.save();
+      c.strokeStyle = ACCENT;
+      c.lineWidth = 1.2;
+      A.forEach((a, i) => {
+        const [x, y] = toScreen(a.x, a.y);
+        if (a.hx || a.hy) {
+          const [ox, oy] = toScreen(a.x + a.hx, a.y + a.hy);
+          const [ix, iy] = toScreen(a.x - a.hx, a.y - a.hy);
+          c.beginPath();
+          c.moveTo(ix, iy);
+          c.lineTo(ox, oy);
+          c.stroke();
+          screenDot(c, ox, oy, 3.5, '#fff');
+          screenDot(c, ix, iy, 3.5, '#fff');
+        }
+        c.save();
+        c.fillStyle = i === 0 ? ACCENT : '#fff';
+        c.beginPath();
+        c.rect(x - 5, y - 5, 10, 10);
+        c.fill();
+        c.stroke();
+        c.restore();
+      });
+      c.restore();
     }
 
     // 올가미 / 사각형 선택 영역
@@ -1030,14 +1375,8 @@
         c.moveTo(tx, ty);
         c.lineTo(rx, ry);
         c.stroke();
-        for (const [x, y, r] of [[rx, ry, 8], [box.pts[2][0], box.pts[2][1], 7]]) {
-          c.beginPath();
-          c.arc(x, y, r, 0, Math.PI * 2);
-          c.fillStyle = '#fff';
-          c.fill();
-          c.stroke();
-        }
-        // 회전 핸들 안 작은 화살표 표시
+        screenDot(c, rx, ry, 8, '#fff');
+        screenDot(c, box.pts[2][0], box.pts[2][1], 7, '#fff');
         c.beginPath();
         c.arc(rx, ry, 3.5, -Math.PI * 0.9, Math.PI * 0.4);
         c.stroke();
@@ -1045,14 +1384,14 @@
       c.restore();
     }
 
-    // 지우개 커서
-    const cursor = active && active.kind === 'erase' ? active.cursor : hover;
-    if (tool.current === 'eraser' && cursor) {
+    // 지우개 / 흐림 붓 커서
+    const cursor = active && active.cursor ? active.cursor : hover;
+    const cursorR = brushCursorRadius();
+    if (cursor && cursorR) {
       c.setTransform(dpr, 0, 0, dpr, 0, 0);
-      const r = Math.max(2, tool.eraserSize / 2 * v.s);
       c.save();
       c.beginPath();
-      c.arc(cursor[0], cursor[1], r, 0, Math.PI * 2);
+      c.arc(cursor[0], cursor[1], cursorR, 0, Math.PI * 2);
       c.lineWidth = 1.5;
       c.strokeStyle = 'rgba(255,255,255,.9)';
       c.stroke();
@@ -1061,6 +1400,13 @@
       c.stroke();
       c.restore();
     }
+  }
+
+  function brushCursorRadius() {
+    const s = board.view.s;
+    if (tool.current === 'eraser') return tool.eraserMode === 'layer' ? LAYER_ERASER_PX : Math.max(2, tool.eraserSize / 2 * s);
+    if (tool.current === 'blur') return Math.max(2, tool.blurSize / 2 * s);
+    return 0;
   }
 
   // ================= 화면 이동/확대 =================
@@ -1161,11 +1507,18 @@
       const hit = hitSelection(x, y);
       if (hit) { startTransform(e, hit, x, y); return; }
     }
-    if (t === 'paste') { startPress(e, x, y); return; }
+    // 톡 누르는 도구: 끌면 화면 이동
+    if (t === 'paste' || t === 'underlay' || t === 'fill') { startPress(e, x, y, t); return; }
     if (fingerNav) { startPan(e.pointerId, x, y); return; }
-    if (t === 'pen' || t === 'magic') startDrawing(e, x, y);
-    else if (t === 'eraser') startErase(e, x, y);
-    else if (t === 'select') startLasso(e, x, y);
+    switch (t) {
+      case 'pen': case 'magic': startDrawing(e, x, y); break;
+      case 'eraser': startErase(e, x, y); break;
+      case 'select': startLasso(e, x, y); break;
+      case 'guide': startGuide(e, x, y); break;
+      case 'shape': tool.shape === 'polygon' ? polygonDown(e, x, y) : startShape(e, x, y); break;
+      case 'curve': curveDown(e, x, y); break;
+      case 'blur': startBlur(e, x, y); break;
+    }
   }
 
   canvas.addEventListener('pointermove', e => {
@@ -1176,7 +1529,7 @@
     if (e.pointerType === 'touch' && touches.has(id)) touches.set(id, { x, y });
     if (e.pointerType !== 'touch') {
       hover = [x, y];
-      if (tool.current === 'eraser' && !active) requestRender();
+      if (!active && (brushCursorRadius() || polyDraft || curveDraft)) requestRender();
     }
 
     if (gesture && touches.has(id)) { updateGesture(); return; }
@@ -1189,18 +1542,23 @@
     }
 
     if (!active || active.id !== id) return;
+    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+    const list = events.length ? events : [e];
     switch (active.kind) {
-      case 'draw': {
-        const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
-        for (const ev of events.length ? events : [e]) addPoint(ev, ...localPoint(ev));
+      case 'draw':
+        for (const ev of list) addPoint(ev, ...localPoint(ev));
         requestRender();
         break;
-      }
-      case 'erase': {
-        const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
-        for (const ev of events.length ? events : [e]) eraseTo(...localPoint(ev));
+      case 'erase':
+        for (const ev of list) eraseTo(...localPoint(ev));
         break;
-      }
+      case 'guide': guideTo(x, y); break;
+      case 'shape': shapeTo(x, y); break;
+      case 'polypt': polygonMove(x, y); break;
+      case 'curvehandle': case 'curvemove': curveMove(x, y); break;
+      case 'blurpaint':
+        for (const ev of list) blurTo(...localPoint(ev));
+        break;
       case 'lasso': lassoTo(x, y); break;
       case 'transform': updateTransform(x, y); break;
       case 'press': pressMove(x, y); break;
@@ -1236,11 +1594,15 @@
     switch (a.kind) {
       case 'draw': finishDrawing(); break;
       case 'erase': finishErase(); break;
+      case 'guide': finishGuide(); break;
+      case 'shape': finishShape(); break;
+      case 'curvehandle': case 'curvemove': case 'polypt': break;
+      case 'blurpaint': finishBlur(); break;
       case 'lasso': finishLasso(); break;
       case 'transform': finishTransform(); break;
       case 'press': finishPress(); break;
     }
-    active = null;
+    if (active === a) active = null;
     requestRender();
   }
 
@@ -1250,6 +1612,9 @@
     if (!a) return;
     if (a.holdTimer) clearTimeout(a.holdTimer);
     if (a.timer) clearTimeout(a.timer);
+    // 여러 번 눌러 만드는 도형은 방금 찍은 점만 취소
+    if (a.kind === 'polypt' && polyDraft) { polyDraft.pts.pop(); if (!polyDraft.pts.length) polyDraft = null; }
+    if (a.kind === 'curvehandle' && curveDraft) { curveDraft.anchors.pop(); if (!curveDraft.anchors.length) curveDraft = null; }
     live.hidden = new Set();
     live.erase = null;
     live.transform = null;
@@ -1282,25 +1647,39 @@
     viewChanged();
   }
 
-  // ================= 펜 / 매직 펜 =================
-  function startDrawing(e, x, y) {
-    const [wx, wy] = toWorld(x, y);
+  function addLayer(node) {
+    checkpoint();
+    board.layers.push(node);
+    strokesChanged();
+  }
+
+  // 현재 펜 설정으로 선 레이어 만들기
+  function penStroke(points, namePrefix) {
     const pen = tool.pen;
-    const stroke = {
+    const s = {
       id: uid(),
       kind: 'stroke',
-      name: '',
+      name: namePrefix ? nextName(namePrefix) : '',
       pen,
       color: tool.color,
       size: tool.penSizes[pen],
       visible: true,
-      points: [round1(wx), round1(wy)],
+      points,
     };
+    if (pen === 'calligraphy') s.nib = NIB_ANGLE;
+    return s;
+  }
+
+  // ================= 펜 / 매직 펜 =================
+  function startDrawing(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    const stroke = penStroke([round1(wx), round1(wy)]);
     active = {
       kind: 'draw',
       id: e.pointerId,
       type: e.pointerType,
       stroke,
+      preview: stroke,
       lastX: x,
       lastY: y,
       lastT: e.timeStamp,
@@ -1311,8 +1690,7 @@
       snapped: false,
       holdTimer: 0,
     };
-    if (pen === 'brush') stroke.w = [widthFactor(e, 0)];
-    if (pen === 'calligraphy') stroke.nib = NIB_ANGLE;
+    if (stroke.pen === 'brush') stroke.w = [widthFactor(e, 0)];
     if (active.magic) armHold();
     requestRender();
   }
@@ -1331,8 +1709,7 @@
   function addPoint(e, x, y) {
     const a = active;
     if (a.snapped) return;
-    const dx = x - a.lastX, dy = y - a.lastY;
-    const d = Math.hypot(dx, dy);
+    const d = Math.hypot(x - a.lastX, y - a.lastY);
     if (d < 1) return;
     const dt = Math.max(1, e.timeStamp - a.lastT);
     a.lastX = x;
@@ -1370,31 +1747,295 @@
   }
 
   function finishDrawing() {
+    clearTimeout(active.holdTimer);
+    const s = active.stroke;
+    s.name = nextName('선');
+    addLayer(s);
+  }
+
+  // ================= 가상 선 =================
+  // 채우기에서만 경계로 쓰이는 선 (저장 이미지엔 안 나옴)
+  function startGuide(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    const node = { id: uid(), kind: 'guide', name: '', visible: true, size: 0, points: [round1(wx), round1(wy)] };
+    active = { kind: 'guide', id: e.pointerId, type: e.pointerType, mode: tool.guideMode, node, preview: node, lastScreen: [x, y], start: [round1(wx), round1(wy)] };
+    requestRender();
+  }
+
+  function guideTo(x, y) {
     const a = active;
-    clearTimeout(a.holdTimer);
-    const s = a.stroke;
+    const [wx, wy] = toWorld(x, y);
+    if (a.mode === 'line') {
+      a.node.points = [...a.start, round1(wx), round1(wy)];
+    } else {
+      if (Math.hypot(x - a.lastScreen[0], y - a.lastScreen[1]) < 1.5) return;
+      a.lastScreen = [x, y];
+      a.node.points.push(round1(wx), round1(wy));
+    }
+    requestRender();
+  }
+
+  function finishGuide() {
+    const n = active.node;
+    if (n.points.length < 4) return;
+    n.name = nextName('가상 선');
+    addLayer(n);
+  }
+
+  // ================= 도형 =================
+  function shapeNodeFrom(pts, closed, seed, filled, noise, name) {
+    const path = window.Shapes.roughen(pts, closed, noise, seed);
+    const flat = window.Shapes.toFlat(path);
+    if (filled && closed) {
+      return { id: uid(), kind: 'fill', name: name ? nextName(name) : '', color: tool.color, visible: true, paths: [flat] };
+    }
+    return penStroke(flat, name);
+  }
+
+  function startShape(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    active = {
+      kind: 'shape',
+      id: e.pointerId,
+      type: e.pointerType,
+      a: { x: wx, y: wy },
+      b: { x: wx, y: wy },
+      seed: (Math.random() * 1e9) | 0,
+      sx: x,
+      sy: y,
+      moved: false,
+      preview: null,
+    };
+  }
+
+  function shapeTo(x, y) {
+    const a = active;
+    const [wx, wy] = toWorld(x, y);
+    a.b = { x: wx, y: wy };
+    if (Math.hypot(x - a.sx, y - a.sy) > 4) a.moved = true;
+    if (!a.moved) return;
+    const g = window.Shapes.generate(tool.shape, a.a, a.b, { square: tool.shapeSquare || shiftDown });
+    a.preview = shapeNodeFrom(g.pts, g.closed, a.seed, tool.shapeFilled, tool.noise);
+    requestRender();
+  }
+
+  function finishShape() {
+    const a = active;
+    if (!a.moved || !a.preview) return;
+    const label = SHAPES.find(s => s.id === tool.shape).label;
+    a.preview.name = nextName(label);
+    addLayer(a.preview);
+  }
+
+  // 다각형: 톡톡 눌러 꼭짓점 → 첫 점을 누르면 닫힘
+  function polygonDown(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    if (!polyDraft) polyDraft = { pts: [], seed: (Math.random() * 1e9) | 0 };
+    const pts = polyDraft.pts;
+    if (pts.length >= 3) {
+      const [fx, fy] = toScreen(pts[0].x, pts[0].y);
+      if (Math.hypot(x - fx, y - fy) < 16) { commitPolygon(true); return; }
+    }
+    pts.push({ x: wx, y: wy });
+    active = { kind: 'polypt', id: e.pointerId, type: e.pointerType };
+    buildContextBar();
+    requestRender();
+  }
+
+  function polygonMove(x, y) {
+    const [wx, wy] = toWorld(x, y);
+    const pts = polyDraft.pts;
+    pts[pts.length - 1] = { x: wx, y: wy };
+    requestRender();
+  }
+
+  function draftPolygonNode(extra, closed = false) {
+    const pts = extra ? [...polyDraft.pts, { x: extra[0], y: extra[1] }] : polyDraft.pts;
+    if (pts.length < 2) return null;
+    return shapeNodeFrom(pts, closed, polyDraft.seed, closed && tool.shapeFilled, tool.noise);
+  }
+
+  function commitPolygon(closed) {
+    const d = polyDraft;
+    polyDraft = null;
+    if (d && d.pts.length >= (closed ? 3 : 2)) {
+      const n = shapeNodeFrom(d.pts, closed, d.seed, closed && tool.shapeFilled, tool.noise, '다각형');
+      addLayer(n);
+    }
+    buildContextBar();
+    requestRender();
+  }
+
+  // ================= 베지에 곡선 =================
+  // 톡 누르면 꼭짓점, 누른 채 끌면 곡선 손잡이, 첫 점을 누르면 닫힌 도형
+  function curveDown(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    if (!curveDraft) curveDraft = { anchors: [] };
+    const A = curveDraft.anchors;
+    const near = i => { const [ax, ay] = toScreen(A[i].x, A[i].y); return Math.hypot(x - ax, y - ay) < 14; };
+    if (A.length >= 2 && near(0)) { commitCurve(true); return; }
+    for (let i = A.length - 1; i >= 0; i--) {
+      if (near(i)) {
+        active = { kind: 'curvemove', id: e.pointerId, type: e.pointerType, idx: i };
+        return;
+      }
+    }
+    A.push({ x: wx, y: wy, hx: 0, hy: 0 });
+    active = { kind: 'curvehandle', id: e.pointerId, type: e.pointerType, idx: A.length - 1, sx: x, sy: y };
+    buildContextBar();
+    requestRender();
+  }
+
+  function curveMove(x, y) {
+    const a = active;
+    const [wx, wy] = toWorld(x, y);
+    const p = curveDraft.anchors[a.idx];
+    if (a.kind === 'curvemove') {
+      p.x = wx; p.y = wy;
+    } else if (Math.hypot(x - a.sx, y - a.sy) > 3) {
+      p.hx = wx - p.x; p.hy = wy - p.y;
+    }
+    requestRender();
+  }
+
+  function draftCurveNode(closed, extra) {
+    const A = extra ? [...curveDraft.anchors, { x: extra[0], y: extra[1], hx: 0, hy: 0 }] : curveDraft.anchors;
+    if (A.length < 2) return null;
+    const pts = window.Shapes.bezier(A, closed);
+    const flat = window.Shapes.toFlat(pts);
+    if (closed && tool.curveFilled) return { id: uid(), kind: 'fill', name: '', color: tool.color, visible: true, paths: [flat] };
+    return penStroke(flat);
+  }
+
+  function commitCurve(closed) {
+    const d = curveDraft;
+    if (d && d.anchors.length >= 2) {
+      const n = draftCurveNode(closed);
+      n.name = nextName(closed ? '곡선 도형' : '곡선');
+      curveDraft = null;
+      addLayer(n);
+    } else {
+      curveDraft = null;
+    }
+    buildContextBar();
+    requestRender();
+  }
+
+  // 다른 도구로 가거나 캔버스를 바꿀 때 만들던 도형을 열린 선으로 마무리
+  function finishDrafts() {
+    if (polyDraft) commitPolygon(false);
+    if (curveDraft) commitCurve(false);
+  }
+
+  // ================= 흐림 =================
+  function startBlur(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    const node = { id: uid(), kind: 'blur', name: '', visible: true, size: tool.blurSize, strength: tool.blurStrength, points: [round1(wx), round1(wy)] };
+    active = { kind: 'blurpaint', id: e.pointerId, type: e.pointerType, node, lastScreen: [x, y], cursor: [x, y] };
+    invalidate();
+  }
+
+  function blurTo(x, y) {
+    const a = active;
+    a.cursor = [x, y];
+    if (Math.hypot(x - a.lastScreen[0], y - a.lastScreen[1]) < 2) { requestRender(); return; }
+    a.lastScreen = [x, y];
+    const [wx, wy] = toWorld(x, y);
+    a.node.points.push(round1(wx), round1(wy));
+    bboxCache.delete(a.node);
+    invalidate();
+  }
+
+  function finishBlur() {
+    const n = active.node;
+    bboxCache.delete(n);
+    n.name = nextName('흐림');
+    active = null;
+    addLayer(n);
+  }
+
+  // ================= 채우기 =================
+  // 둘러싸인 영역을 본떠 새 레이어(면)를 만든다. 선과 가상 선이 경계가 된다.
+  function fillAt(sx, sy) {
+    const [px, py] = toWorld(sx, sy);
+    const [wx0, wy0] = toWorld(0, 0);
+    const [wx1, wy1] = toWorld(cw, ch);
+    const area = (wx1 - wx0) * (wy1 - wy0);
+    const k = Math.min(board.view.s * Math.min(dpr, 2), Math.sqrt(4e6 / area));
+    const W = Math.ceil((wx1 - wx0) * k), H = Math.ceil((wy1 - wy0) * k);
+    const c = document.createElement('canvas');
+    c.width = W;
+    c.height = H;
+    const x = c.getContext('2d', { willReadFrequently: true });
+    x.setTransform(k, 0, 0, k, -wx0 * k, -wy0 * k);
+
+    // 경계 그리기 (반투명 펜도 빈틈 없는 벽으로)
+    for (const n of allLeaves(true)) {
+      if (n.kind === 'guide') {
+        x.save();
+        x.strokeStyle = '#000';
+        x.lineWidth = Math.max(1.8 / k, 1);
+        x.lineCap = 'round';
+        x.lineJoin = 'round';
+        x.beginPath();
+        tracePath(x, n.points);
+        x.stroke();
+        x.restore();
+      } else if (n.kind === 'stroke') {
+        const solid = ['pencil', 'marker', 'highlighter'].includes(n.pen) ? { ...n, pen: 'basic' } : n;
+        drawVisible(x, solid);
+      }
+    }
+    const inPage = board.type === 'main' && px >= 0 && py >= 0 && px <= project.width && py <= project.height;
+    if (inPage) {
+      x.strokeStyle = '#000';
+      x.lineWidth = 2 / k;
+      x.strokeRect(0, 0, project.width, project.height);
+    }
+
+    const data = x.getImageData(0, 0, W, H).data;
+    const wall = new Uint8Array(W * H);
+    for (let i = 0; i < wall.length; i++) wall[i] = data[i * 4 + 3] > 40 ? 1 : 0;
+    const res = window.Raster.flood(wall, W, H, Math.floor((px - wx0) * k), Math.floor((py - wy0) * k));
+    if (!res) { toast('선 위가 아니라 선으로 둘러싸인 안쪽을 눌러 주세요'); return; }
+    if (res.touchesEdge) {
+      toast('닫힌 영역이 아니에요 · 틈은 가상 선으로 막고, 화면 밖까지 이어지면 축소해 주세요', 3500);
+      return;
+    }
+    const mask = window.Raster.dilate(res.mask, W, H);
+    const paths = window.Raster.trace(mask, W, H)
+      .map(l => window.Raster.simplify(l, 0.8))
+      .filter(l => l.length >= 6 && Math.abs(window.Raster.polyArea(l)) > 4)
+      .map(l => l.map((v, i) => round1(i % 2 ? v / k + wy0 : v / k + wx0)));
+    if (!paths.length) return;
+
+    const node = { id: uid(), kind: 'fill', name: nextName('채우기'), color: tool.color, visible: true, paths };
     checkpoint();
-    s.name = '선 ' + board.nextNum++;
-    board.layers.push(s);
+    // 채우기 면은 선보다 뒤에: 기존 채우기 면들 바로 위에 넣음
+    let at = 0;
+    board.layers.forEach((n, i) => { if (n.kind === 'fill') at = i + 1; });
+    board.layers.splice(at, 0, node);
     strokesChanged();
   }
 
   // ================= 지우개 =================
   function startErase(e, x, y) {
     const [wx, wy] = toWorld(x, y);
-    const path = { size: tool.eraserSize, points: [round1(wx), round1(wy)] };
+    const mode = tool.eraserMode;
+    const size = mode === 'layer' ? LAYER_ERASER_PX * 2 / board.view.s : tool.eraserSize;
+    const path = { size, points: [round1(wx), round1(wy)] };
     active = {
       kind: 'erase',
       id: e.pointerId,
       type: e.pointerType,
-      mode: tool.eraserMode,
+      mode,
       path,
       last: [wx, wy],
       lastScreen: [x, y],
       cursor: [x, y],
       hits: new Set(),
     };
-    if (active.mode === 'area') live.erase = { path, strokes: active.hits };
+    if (mode === 'area') live.erase = { path, strokes: active.hits };
     else live.hidden = active.hits;
     eraseSegment(wx, wy, wx, wy);
     invalidate();
@@ -1416,15 +2057,31 @@
   function eraseSegment(ax, ay, bx, by) {
     const a = active;
     const r = a.path.size / 2;
-    let changed = false;
-    for (const s of allStrokes(true)) {
-      if (a.hits.has(s.id)) continue;
-      if (strokeNearSegment(s, ax, ay, bx, by, r + s.size / 2)) {
-        a.hits.add(s.id);
-        changed = true;
+    if (a.mode === 'layer') {
+      let changed = false;
+      // 레이어 지우개: 지나간 자리의 맨 위 레이어만 지움 (아래에 깔린 채우기 면 등은 남김)
+      const leaves = allLeaves(true);
+      const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / r));
+      for (let s = 0; s <= steps; s++) {
+        const x = ax + (bx - ax) * s / steps, y = ay + (by - ay) * s / steps;
+        for (let i = leaves.length - 1; i >= 0; i--) {
+          const n = leaves[i];
+          if (!leafNearSegment(n, x, y, x, y, r)) continue;
+          if (!a.hits.has(n.id)) { a.hits.add(n.id); changed = true; }
+          break;
+        }
+      }
+      if (changed) invalidate();
+      return;
+    }
+    for (const n of allLeaves(true)) {
+      if (a.hits.has(n.id)) continue;
+      // 영역 지우개는 그림(선, 채우기 면, 이미지)만 뚫음
+      if (!(n.kind === 'stroke' || n.kind === 'fill' || n.kind === 'image')) continue;
+      if (leafNearSegment(n, ax, ay, bx, by, r)) {
+        a.hits.add(n.id);
       }
     }
-    if (changed && a.mode === 'layer') invalidate();
   }
 
   function finishErase() {
@@ -1434,7 +2091,7 @@
     if (a.hits.size) {
       checkpoint();
       if (a.mode === 'area') {
-        const path = { size: a.path.size, points: a.path.points.slice() };
+        const path = { size: round2(a.path.size), points: a.path.points.slice() };
         for (const id of a.hits) replaceNode(id, s => ({ ...s, erase: [...(s.erase || []), path] }));
       } else {
         removeNodes(a.hits);
@@ -1482,22 +2139,26 @@
     return a.pts;
   }
 
+  // 그 점의 맨 앞 레이어 (최상위 노드)
+  function topNodeAt(list, wx, wy) {
+    const tol = 10 / board.view.s;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const n = list[i];
+      if (!n.visible) continue;
+      const leaves = leavesOf(n, [], true);
+      for (let j = leaves.length - 1; j >= 0; j--) {
+        if (leafNearSegment(leaves[j], wx, wy, wx, wy, tol)) return n;
+      }
+    }
+    return null;
+  }
+
   function finishLasso() {
     const a = active;
     if (a.screenLen < 6) {
-      // 가볍게 톡: 그 자리의 맨 앞 선을 고르거나, 빈 곳이면 선택 해제
-      const [wx, wy] = a.end;
-      const tol = 10 / board.view.s;
-      const strokes = allStrokes(true);
-      for (let i = strokes.length - 1; i >= 0; i--) {
-        const s = strokes[i];
-        if (strokeNearSegment(s, wx, wy, wx, wy, s.size / 2 + tol)) {
-          const top = pathTo(s.id)[0];
-          setSelection([top.id]);
-          return;
-        }
-      }
-      setSelection([]);
+      // 가볍게 톡: 그 자리의 맨 앞 레이어를 고르거나, 빈 곳이면 선택 해제
+      const n = topNodeAt(board.layers, ...a.end);
+      setSelection(n ? [n.id] : []);
       return;
     }
     const poly = lassoPolygon(a);
@@ -1508,7 +2169,7 @@
     const ids = [];
     for (const n of board.layers) {
       if (!n.visible) continue;
-      if (strokesOf(n, [], true).some(s => strokeInPoly(s, poly, pb))) ids.push(n.id);
+      if (leavesOf(n, [], true).some(s => leafInPoly(s, poly, pb))) ids.push(n.id);
     }
     setSelection(ids);
   }
@@ -1560,7 +2221,7 @@
   }
 
   function handlesActive() {
-    return !!(selBox && selection.size && (tool.current === 'select' || tool.current === 'paste'));
+    return !!(selBox && selection.size && ['select', 'paste', 'underlay'].includes(tool.current));
   }
 
   function boxScreen() {
@@ -1584,8 +2245,7 @@
     const R = 22;
     if (Math.hypot(x - b.rot[0], y - b.rot[1]) < R) return 'rotate';
     if (Math.hypot(x - b.pts[2][0], y - b.pts[2][1]) < R) return 'scale';
-    const poly = b.pts.flat();
-    if (pointInPoly(x, y, poly)) return 'move';
+    if (pointInPoly(x, y, b.pts.flat())) return 'move';
     return null;
   }
 
@@ -1680,6 +2340,8 @@
   function groupSelection() {
     const nodes = selectedNodes();
     if (nodes.length < 2) { toast('두 개 이상 선택해야 묶을 수 있어요'); return; }
+    const under = nodes.map(n => isUnderlay(n.id));
+    if (under.some(u => u !== under[0])) { toast('밑그림과 일반 레이어는 함께 묶을 수 없어요'); return; }
     checkpoint();
     const front = locate(nodes[nodes.length - 1].id);
     const g = { id: uid(), kind: 'group', name: '그룹 ' + board.nextGroup++, visible: true, children: [] };
@@ -1712,6 +2374,11 @@
     strokesChanged();
   }
 
+  function treeSignature() {
+    const ids = n => n.kind === 'group' ? [n.id, n.children.map(ids)] : n.id;
+    return JSON.stringify([board.layers.map(ids), board.underlays.map(ids)]);
+  }
+
   // 앞/뒤 순서 바꾸기 (같은 그룹 안에서)
   function reorderSelection(dir) {
     if (!requireSelection()) return;
@@ -1720,8 +2387,8 @@
       const loc = locate(id);
       if (loc) lists.add(loc.list);
     }
-    const before = JSON.stringify(board.layers.map(function ids(n) { return n.kind === 'group' ? [n.id, n.children.map(ids)] : n.id; }));
-    const snap = cloneTree(board.layers);
+    const before = treeSignature();
+    const snap = snapshot();
     const sel = n => selection.has(n.id);
     for (const list of lists) {
       if (dir === 'forward') {
@@ -1737,10 +2404,24 @@
         list.splice(0, list.length, ...(dir === 'front' ? [...rest, ...picked] : [...picked, ...rest]));
       }
     }
-    const after = JSON.stringify(board.layers.map(function ids(n) { return n.kind === 'group' ? [n.id, n.children.map(ids)] : n.id; }));
-    if (before === after) { toast(dir === 'forward' || dir === 'front' ? '이미 맨 앞이에요' : '이미 맨 뒤예요'); return; }
+    if (before === treeSignature()) { toast(dir === 'forward' || dir === 'front' ? '이미 맨 앞이에요' : '이미 맨 뒤예요'); return; }
     pushUndo(snap);
     strokesChanged();
+  }
+
+  // 레이어 ↔ 밑그림
+  function moveSelectionTo(toUnder) {
+    if (!requireSelection()) return;
+    const nodes = selectedNodes().filter(n => isUnderlay(n.id) !== toUnder);
+    if (!nodes.length) { toast(toUnder ? '이미 밑그림이에요' : '선택한 것 중에 밑그림이 없어요'); return; }
+    checkpoint();
+    removeNodes(new Set(nodes.map(n => n.id)));
+    (toUnder ? board.underlays : board.layers).push(...nodes);
+    removeNodes(new Set());
+    pruneSelection();
+    selBox = computeBox();
+    strokesChanged();
+    toast(toUnder ? '밑그림으로 바꿨어요 · 다운로드에는 포함되지 않아요' : '일반 레이어로 되돌렸어요');
   }
 
   function toggleVisibility(id) {
@@ -1763,6 +2444,8 @@
     forward: () => reorderSelection('forward'),
     backward: () => reorderSelection('backward'),
     back: () => reorderSelection('back'),
+    'to-underlay': () => moveSelectionTo(true),
+    'from-underlay': () => moveSelectionTo(false),
   };
 
   for (const b of document.querySelectorAll('#selection-bar [data-act], #layer-actions [data-act]')) {
@@ -1773,24 +2456,28 @@
     const bar = $('#selection-bar');
     const n = selection.size;
     bar.hidden = !n;
+    const nodes = n ? selectedNodes() : [];
+    const hasGroup = nodes.some(x => x.kind === 'group');
+    const anyUnder = nodes.some(x => isUnderlay(x.id));
+    const anyLayer = nodes.some(x => !isUnderlay(x.id));
     if (n) {
-      const nodes = selectedNodes();
-      const hasGroup = nodes.some(x => x.kind === 'group');
       $('#selection-count').textContent = `${n}개 선택`;
       bar.querySelector('[data-act="group"]').disabled = n < 2;
       bar.querySelector('[data-act="ungroup"]').disabled = !hasGroup;
     }
     const la = $('#layer-actions');
-    const nodes = n ? selectedNodes() : [];
     la.querySelector('[data-act="group"]').disabled = n < 2;
-    la.querySelector('[data-act="ungroup"]').disabled = !nodes.some(x => x.kind === 'group');
+    la.querySelector('[data-act="ungroup"]').disabled = !hasGroup;
+    la.querySelector('[data-act="to-underlay"]').disabled = !anyLayer;
+    la.querySelector('[data-act="from-underlay"]').disabled = !anyUnder;
     for (const act of ['front', 'forward', 'backward', 'back', 'delete']) la.querySelector(`[data-act="${act}"]`).disabled = !n;
   }
 
-  // ================= 붙여넣기 =================
-  function startPress(e, x, y) {
+  // ================= 톡 누르기 (붙여넣기 / 밑그림 / 채우기) =================
+  function startPress(e, x, y, purpose) {
     const a = {
       kind: 'press',
+      purpose,
       id: e.pointerId,
       type: e.pointerType,
       sx: x,
@@ -1798,12 +2485,14 @@
       fired: false,
       timer: 0,
     };
-    a.timer = setTimeout(() => {
-      if (active !== a) return;
-      a.fired = true;
-      if (navigator.vibrate) navigator.vibrate(12);
-      openPastePopup(a.sx, a.sy);
-    }, 480);
+    if (purpose === 'paste') {
+      a.timer = setTimeout(() => {
+        if (active !== a) return;
+        a.fired = true;
+        if (navigator.vibrate) navigator.vibrate(12);
+        openPastePopup(a.sx, a.sy);
+      }, 480);
+    }
     active = a;
   }
 
@@ -1811,23 +2500,30 @@
     const a = active;
     if (a.fired) return;
     if (Math.hypot(x - a.sx, y - a.sy) > 8) {
-      // 꾹 누르기가 아니라 끌기 → 화면 이동
+      // 톡이 아니라 끌기 → 화면 이동
       clearTimeout(a.timer);
       active = null;
       startPan(a.id, a.sx, a.sy);
-      board.view.x += x - a.sx;
-      board.view.y += y - a.sy;
-      panning.vx = board.view.x - (x - a.sx);
-      panning.vy = board.view.y - (y - a.sy);
+      board.view.x = panning.vx + (x - a.sx);
+      board.view.y = panning.vy + (y - a.sy);
       viewChanged();
     }
   }
 
   function finishPress() {
-    clearTimeout(active.timer);
-    if (!active.fired) toast('화면을 꾹 누르면 복사한 것을 붙여넣을 수 있어요');
+    const a = active;
+    clearTimeout(a.timer);
+    if (a.fired) return;
+    if (a.purpose === 'paste') toast('화면을 꾹 누르면 복사한 것을 붙여넣을 수 있어요');
+    else if (a.purpose === 'fill') fillAt(a.sx, a.sy);
+    else if (a.purpose === 'underlay') {
+      const n = topNodeAt(board.underlays, ...toWorld(a.sx, a.sy));
+      setSelection(n ? [n.id] : []);
+      if (!n && board.underlays.length) toast('밑그림을 톡 눌러 선택하면 옮기거나 돌릴 수 있어요');
+    }
   }
 
+  // ================= 붙여넣기 =================
   const pastePopup = $('#paste-popup');
   let pasteAt = null;
 
@@ -1846,9 +2542,8 @@
       btn.type = 'button';
       btn.className = 'paste-pick';
       btn.appendChild(clipThumb(clip));
-      const count = countNodes(clip.nodes);
       const label = document.createElement('span');
-      label.textContent = `선 ${count}개`;
+      label.textContent = `레이어 ${countLeaves(clip.nodes)}개`;
       btn.appendChild(label);
       btn.addEventListener('click', () => pasteClip(clip));
       const del = document.createElement('button');
@@ -1922,8 +2617,60 @@
     const minSize = 1.6 / scale;
     const thicken = list => list.map(n => n.kind === 'group'
       ? { ...n, children: thicken(n.children) }
-      : (n.size < minSize ? { ...n, size: minSize } : n));
-    drawNodes(x, thicken(nodes), null);
+      : (n.size != null && n.size < minSize && n.kind !== 'guide' ? { ...n, size: minSize } : n));
+    drawNodes(x, thicken(nodes), null, 'thumb');
+  }
+
+  // ================= 밑그림 이미지 =================
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/*';
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files && fileInput.files[0];
+    fileInput.value = '';
+    if (file) loadUnderlayImage(file);
+  });
+
+  function loadUnderlayImage(file) {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      // 저장 공간을 아끼려고 긴 변 1600px 로 줄여 JPEG 로 보관
+      const maxSide = 1600;
+      const k = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(img.naturalWidth * k));
+      c.height = Math.max(1, Math.round(img.naturalHeight * k));
+      const x = c.getContext('2d');
+      x.fillStyle = '#fff';
+      x.fillRect(0, 0, c.width, c.height);
+      x.drawImage(img, 0, 0, c.width, c.height);
+      const src = c.toDataURL('image/jpeg', 0.85);
+      // 화면의 80% 크기로 가운데에 배치
+      const [wx0, wy0] = toWorld(0, 0), [wx1, wy1] = toWorld(cw, ch);
+      const fit = Math.min((wx1 - wx0) * 0.8 / c.width, (wy1 - wy0) * 0.8 / c.height);
+      const node = {
+        id: uid(),
+        kind: 'image',
+        name: nextName('밑그림 이미지'),
+        visible: true,
+        src,
+        cx: round1((wx0 + wx1) / 2),
+        cy: round1((wy0 + wy1) / 2),
+        w: round1(c.width * fit),
+        h: round1(c.height * fit),
+        angle: 0,
+      };
+      checkpoint();
+      board.underlays.push(node);
+      selection = new Set([node.id]);
+      selBox = computeBox();
+      strokesChanged();
+      toast('밑그림을 불러왔어요 · 상자를 끌어 옮기고 돌릴 수 있어요');
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); toast('이미지를 열지 못했어요'); };
+    img.src = url;
   }
 
   // ================= 실행 취소 (보드별 스냅샷) =================
@@ -1931,6 +2678,10 @@
     let h = histories.get(board.id);
     if (!h) { h = { undo: [], redo: [] }; histories.set(board.id, h); }
     return h;
+  }
+
+  function snapshot() {
+    return { layers: cloneTree(board.layers), underlays: cloneTree(board.underlays) };
   }
 
   function pushUndo(snap) {
@@ -1942,7 +2693,7 @@
   }
 
   function checkpoint() {
-    pushUndo(cloneTree(board.layers));
+    pushUndo(snapshot());
   }
 
   function restore(from, to) {
@@ -1950,20 +2701,29 @@
     const h = history();
     const snap = h[from].pop();
     if (!snap) return;
-    h[to].push(cloneTree(board.layers));
-    board.layers = cloneTree(snap);
+    h[to].push(snapshot());
+    board.layers = cloneTree(snap.layers);
+    board.underlays = cloneTree(snap.underlays);
     selection = normalizeSelection(selection);
     selBox = computeBox();
     updateHistoryButtons();
     strokesChanged();
   }
 
-  const undo = () => restore('undo', 'redo');
+  const undo = () => { if (polyDraft || curveDraft) { cancelDraftPoint(); return; } restore('undo', 'redo'); };
   const redo = () => restore('redo', 'undo');
+
+  // 만드는 중인 도형에서 실행 취소는 마지막 점만 지움
+  function cancelDraftPoint() {
+    if (polyDraft) { polyDraft.pts.pop(); if (!polyDraft.pts.length) polyDraft = null; }
+    else if (curveDraft) { curveDraft.anchors.pop(); if (!curveDraft.anchors.length) curveDraft = null; }
+    buildContextBar();
+    requestRender();
+  }
 
   function updateHistoryButtons() {
     const h = history();
-    $('#btn-undo').disabled = h.undo.length === 0;
+    $('#btn-undo').disabled = h.undo.length === 0 && !polyDraft && !curveDraft;
     $('#btn-redo').disabled = h.redo.length === 0;
   }
 
@@ -1975,6 +2735,7 @@
     invalidate();
     renderLayers();
     updateSelectionUI();
+    updateHistoryButtons();
     markChanged();
   }
 
@@ -1991,10 +2752,11 @@
 
   function renderLayers() {
     if (!layersOpen || !board) return;
-    const total = countNodes(board.layers);
-    $('#layer-count').textContent = total ? `선 ${total}개` : '';
-    $('#layers-empty').hidden = board.layers.length > 0;
-    $('#layer-hint').hidden = board.layers.length === 0;
+    const total = countLeaves(board.layers) + countLeaves(board.underlays);
+    $('#layer-count').textContent = total ? `${total}개` : '';
+    const empty = !board.layers.length && !board.underlays.length;
+    $('#layers-empty').hidden = !empty;
+    $('#layer-hint').hidden = empty;
     layerList.innerHTML = '';
     const walk = (list, depth, hiddenParent) => {
       for (let i = list.length - 1; i >= 0; i--) {
@@ -2004,6 +2766,13 @@
       }
     };
     walk(board.layers, 0, false);
+    if (board.underlays.length) {
+      const head = document.createElement('li');
+      head.className = 'layer-section';
+      head.textContent = `밑그림 · 투명도 ${Math.round(board.underlayOpacity * 100)}%`;
+      layerList.appendChild(head);
+      walk(board.underlays, 0, false);
+    }
   }
 
   function toggleLayerSelection(id) {
@@ -2016,13 +2785,21 @@
       for (const g of path.slice(0, -1)) next.delete(g.id);
       const node = path[path.length - 1];
       if (node.kind === 'group') {
-        const kids = new Set();
-        (function walk(l) { for (const c of l) { kids.add(c.id); if (c.kind === 'group') walk(c.children); } })(node.children);
-        for (const k of kids) next.delete(k);
+        (function walk(l) { for (const c of l) { next.delete(c.id); if (c.kind === 'group') walk(c.children); } })(node.children);
       }
       next.add(id);
     }
     setSelection(next);
+  }
+
+  function leafMeta(n) {
+    switch (n.kind) {
+      case 'fill': return '채우기 면';
+      case 'guide': return '가상 선 · 저장 안 됨';
+      case 'blur': return `흐림 · 강도 ${Math.round(n.strength)}`;
+      case 'image': return '이미지';
+      default: return `${(PEN[n.pen] || PEN.basic).label} · ${Math.round(n.size)}px${n.erase ? ' · 지움' : ''}`;
+    }
   }
 
   function layerRow(n, depth, hiddenParent) {
@@ -2057,13 +2834,15 @@
     meta.className = 'layer-meta';
     if (isGroup) {
       meta.innerHTML = ICONS.folder;
-      meta.append(`선 ${countNodes(n.children)}개`);
+      const s = document.createElement('span');
+      s.textContent = `레이어 ${countLeaves(n.children)}개`;
+      meta.appendChild(s);
     } else {
       const dot = document.createElement('span');
       dot.className = 'layer-color';
-      dot.style.background = n.color;
+      dot.style.background = n.kind === 'guide' ? GUIDE_COLOR : n.kind === 'blur' ? 'rgba(80,140,255,.5)' : (n.color || '#ccc');
       const label = document.createElement('span');
-      label.textContent = `${(PEN[n.pen] || PEN.basic).label} · ${Math.round(n.size)}px${n.erase ? ' · 지움' : ''}`;
+      label.textContent = leafMeta(n);
       meta.append(dot, label);
     }
     info.append(name, meta);
@@ -2081,7 +2860,7 @@
   }
 
   function layerThumb(n) {
-    let c = n.kind === 'stroke' ? thumbCache.get(n) : null;
+    let c = n.kind !== 'group' ? thumbCache.get(n) : null;
     if (c) return c;
     const W = 48, H = 36, k = 2;
     c = document.createElement('canvas');
@@ -2090,7 +2869,8 @@
     c.height = H * k;
     const frame = board.type === 'main' ? [0, 0, project.width, project.height] : null;
     fitAndDraw(c, [{ ...n, visible: true }], 3 * k, frame);
-    if (n.kind === 'stroke') thumbCache.set(n, c);
+    // 이미지는 아직 불러오는 중일 수 있으니 캐시하지 않음
+    if (n.kind !== 'group' && (n.kind !== 'image' || getImage(n.src))) thumbCache.set(n, c);
     return c;
   }
 
@@ -2098,6 +2878,7 @@
   const SWATCHES = ['#1b1b1f', '#ffffff', '#e5484d', '#f5a524', '#30a46c', '#0090ff', '#4f5bd5', '#8e4ec6'];
   const swatchBox = $('#swatches');
   const contextBar = $('#context-bar');
+  let shiftDown = false;
 
   for (const color of SWATCHES) {
     const b = document.createElement('button');
@@ -2106,7 +2887,7 @@
     b.style.background = color;
     b.dataset.color = color;
     b.title = color;
-    b.addEventListener('click', () => { tool.color = color; syncToolUI(); });
+    b.addEventListener('click', () => { tool.color = color; syncToolUI(false); });
     swatchBox.appendChild(b);
   }
 
@@ -2116,46 +2897,63 @@
 
   function setTool(t) {
     if (!TOOLS[t] || active) return;
+    if (t !== tool.current) finishDrafts();
     tool.current = t;
     closePopups();
     syncToolUI();
     requestRender();
   }
 
-  $('#color-input').addEventListener('input', e => { tool.color = e.target.value; syncToolUI(); });
+  $('#color-input').addEventListener('input', e => { tool.color = e.target.value; syncToolUI(false); });
   $('#size-input').addEventListener('input', e => {
     const v = Number(e.target.value);
-    if (tool.current === 'eraser') tool.eraserSize = v;
-    else tool.penSizes[tool.pen] = v;
+    const target = sizeTarget();
+    if (target === 'eraser') tool.eraserSize = v;
+    else if (target === 'blur') tool.blurSize = v;
+    else if (target === 'pen') tool.penSizes[tool.pen] = v;
     syncToolUI(false);
     requestRender();
   });
 
+  // 굵기 막대가 조절하는 대상
+  function sizeTarget() {
+    const t = tool.current;
+    if (t === 'eraser') return tool.eraserMode === 'area' ? 'eraser' : null;
+    if (t === 'blur') return 'blur';
+    if (t === 'pen' || t === 'magic' || t === 'shape' || t === 'curve') return 'pen';
+    return null;
+  }
+
   function currentSize() {
-    return tool.current === 'eraser' ? tool.eraserSize : tool.penSizes[tool.pen];
+    const target = sizeTarget();
+    return target === 'eraser' ? tool.eraserSize : target === 'blur' ? tool.blurSize : tool.penSizes[tool.pen];
   }
 
   function syncToolUI(rebuildContext = true) {
     const t = tool.current;
     for (const b of document.querySelectorAll('#toolbar .tool')) b.classList.toggle('active', b.dataset.tool === t);
-    const drawing = t === 'pen' || t === 'magic';
-    const sized = drawing || t === 'eraser';
-    $('#color-group').hidden = !drawing;
-    $('#sep-color').hidden = !drawing;
+    const colored = ['pen', 'magic', 'shape', 'curve', 'fill'].includes(t);
+    const sized = !!sizeTarget();
+    $('#color-group').hidden = !colored;
+    $('#sep-color').hidden = !colored;
     $('#size-group').hidden = !sized;
     $('#sep-size').hidden = !sized;
     for (const b of swatchBox.children) b.classList.toggle('active', b.dataset.color.toLowerCase() === tool.color.toLowerCase());
     $('#color-input').value = tool.color;
-    document.documentElement.style.setProperty('--current', t === 'eraser' ? '#9a9aa6' : tool.color);
-    const size = currentSize();
-    $('#size-input').value = size;
-    $('#size-value').textContent = size;
-    $('#size-dot').style.setProperty('--dot', clamp(size, 2, 32) + 'px');
+    document.documentElement.style.setProperty('--current', colored ? tool.color : '#9a9aa6');
+    if (sized) {
+      const size = currentSize();
+      $('#size-input').value = size;
+      $('#size-value').textContent = size;
+      $('#size-dot').style.setProperty('--dot', clamp(size, 2, 32) + 'px');
+    }
     stage.dataset.tool = t;
     if (rebuildContext) buildContextBar();
     else updatePenPreviews();
     updateSelectionUI();
+    updateHistoryButtons();
     storage.set(TOOL_KEY, tool);
+    requestRender();
   }
 
   function chip(label, activeNow, onClick, extra) {
@@ -2170,11 +2968,46 @@
     return b;
   }
 
+  function actionChip(label, onClick, primary) {
+    const b = chip(label, false, onClick);
+    b.classList.add(primary ? 'chip-primary' : 'chip-action');
+    return b;
+  }
+
   function hint(text) {
     const p = document.createElement('span');
     p.className = 'ctx-hint';
     p.textContent = text;
     return p;
+  }
+
+  function sep() {
+    const s = document.createElement('span');
+    s.className = 'ctx-sep';
+    return s;
+  }
+
+  function slider(label, min, max, step, value, onInput, format = v => v) {
+    const wrap = document.createElement('label');
+    wrap.className = 'ctx-slider';
+    const l = document.createElement('span');
+    l.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = min;
+    input.max = max;
+    input.step = step;
+    input.value = value;
+    const out = document.createElement('span');
+    out.className = 'ctx-value';
+    out.textContent = format(value);
+    input.addEventListener('input', () => {
+      const v = Number(input.value);
+      out.textContent = format(v);
+      onInput(v);
+    });
+    wrap.append(l, input, out);
+    return wrap;
   }
 
   function penPreview(penId) {
@@ -2199,12 +3032,17 @@
       w.push(0.35 + 0.65 * Math.sin(t * Math.PI));
     }
     const size = Math.min(PEN[penId].size, 12) * (penId === 'pencil' ? 0.8 : 0.7);
-    const s = { pen: penId, color: tool.color, size, points: pts, w: penId === 'brush' ? w : undefined };
-    drawStroke(x, s);
+    drawVisible(x, { kind: 'stroke', pen: penId, color: tool.color, size, points: pts, w: penId === 'brush' ? w : undefined });
   }
 
   function updatePenPreviews() {
     for (const c of contextBar.querySelectorAll('.pen-preview')) drawPenPreview(c);
+  }
+
+  function penChips(onPick) {
+    for (const p of PENS) {
+      contextBar.appendChild(chip(p.label, tool.pen === p.id, () => { tool.pen = p.id; onPick(); }, penPreview(p.id)));
+    }
   }
 
   function buildContextBar() {
@@ -2214,24 +3052,74 @@
     title.className = 'ctx-title';
     title.textContent = TOOLS[t];
     contextBar.appendChild(title);
+    const rebuild = () => syncToolUI();
 
     if (t === 'pen' || t === 'magic') {
-      for (const p of PENS) {
-        contextBar.appendChild(chip(p.label, tool.pen === p.id, () => { tool.pen = p.id; syncToolUI(); }, penPreview(p.id)));
-      }
+      penChips(rebuild);
       if (t === 'magic') contextBar.appendChild(hint('그은 뒤 멈추고 꾹 누르고 있으면 원·타원·직선·곡선 등으로 바뀌어요'));
     } else if (t === 'eraser') {
-      contextBar.appendChild(chip('레이어 지우개', tool.eraserMode === 'layer', () => { tool.eraserMode = 'layer'; syncToolUI(); }));
-      contextBar.appendChild(chip('영역 지우개', tool.eraserMode === 'area', () => { tool.eraserMode = 'area'; syncToolUI(); }));
+      contextBar.appendChild(chip('레이어 지우개', tool.eraserMode === 'layer', () => { tool.eraserMode = 'layer'; rebuild(); }));
+      contextBar.appendChild(chip('영역 지우개', tool.eraserMode === 'area', () => { tool.eraserMode = 'area'; rebuild(); }));
       contextBar.appendChild(hint(tool.eraserMode === 'layer'
-        ? '닿은 선(레이어)을 통째로 지워요'
+        ? '닿은 레이어를 통째로 지워요'
         : '문지른 부분만 투명하게 지워요 (흰색으로 칠하는 게 아니에요)'));
     } else if (t === 'select') {
-      contextBar.appendChild(chip('올가미', tool.selectMode === 'lasso', () => { tool.selectMode = 'lasso'; syncToolUI(); }));
-      contextBar.appendChild(chip('사각형', tool.selectMode === 'rect', () => { tool.selectMode = 'rect'; syncToolUI(); }));
+      contextBar.appendChild(chip('올가미', tool.selectMode === 'lasso', () => { tool.selectMode = 'lasso'; rebuild(); }));
+      contextBar.appendChild(chip('사각형', tool.selectMode === 'rect', () => { tool.selectMode = 'rect'; rebuild(); }));
       contextBar.appendChild(hint('영역에 걸친 레이어가 잡혀요 · 상자를 끌어 이동, ↻ 로 회전, 모서리로 크기'));
     } else if (t === 'paste') {
       contextBar.appendChild(hint('화면을 꾹 누르면 복사한 목록이 나와요'));
+    } else if (t === 'guide') {
+      contextBar.appendChild(chip('직선', tool.guideMode === 'line', () => { tool.guideMode = 'line'; rebuild(); }));
+      contextBar.appendChild(chip('곡선', tool.guideMode === 'free', () => { tool.guideMode = 'free'; rebuild(); }));
+      contextBar.appendChild(hint('채우기가 삐져나가지 않게 막는 선이에요 · 그림과 다운로드엔 안 보여요'));
+    } else if (t === 'fill') {
+      contextBar.appendChild(hint('선으로 둘러싸인 안쪽을 톡 누르면 그 모양대로 새 레이어가 생겨요'));
+    } else if (t === 'shape') {
+      for (const s of SHAPES) {
+        contextBar.appendChild(chip(s.label, tool.shape === s.id, () => { finishDrafts(); tool.shape = s.id; rebuild(); }));
+      }
+      contextBar.appendChild(sep());
+      contextBar.appendChild(chip('채운 도형', tool.shapeFilled, () => { tool.shapeFilled = !tool.shapeFilled; rebuild(); }));
+      contextBar.appendChild(chip('정비율', tool.shapeSquare, () => { tool.shapeSquare = !tool.shapeSquare; rebuild(); }));
+      contextBar.appendChild(slider('인위적 노이즈', 0, 100, 1, tool.noise, v => {
+        tool.noise = v;
+        storage.set(TOOL_KEY, tool);
+        requestRender();
+      }));
+      if (tool.shape === 'polygon') {
+        contextBar.appendChild(sep());
+        if (polyDraft && polyDraft.pts.length) {
+          contextBar.appendChild(actionChip('닫기', () => commitPolygon(true), true));
+          contextBar.appendChild(actionChip('열린 선으로 완료', () => commitPolygon(false)));
+          contextBar.appendChild(actionChip('취소', () => { polyDraft = null; buildContextBar(); requestRender(); }));
+        } else {
+          contextBar.appendChild(hint('톡톡 눌러 꼭짓점을 찍고 첫 점을 누르면 닫혀요'));
+        }
+      }
+    } else if (t === 'curve') {
+      contextBar.appendChild(chip('채운 도형', tool.curveFilled, () => { tool.curveFilled = !tool.curveFilled; rebuild(); }));
+      contextBar.appendChild(sep());
+      if (curveDraft && curveDraft.anchors.length) {
+        contextBar.appendChild(actionChip('닫아서 도형으로', () => commitCurve(true), true));
+        contextBar.appendChild(actionChip('완료', () => commitCurve(false)));
+        contextBar.appendChild(actionChip('취소', () => { curveDraft = null; buildContextBar(); requestRender(); }));
+      } else {
+        contextBar.appendChild(hint('톡 누르면 점, 누른 채 끌면 곡선 · 첫 점을 누르면 닫힌 도형이 돼요'));
+      }
+    } else if (t === 'underlay') {
+      contextBar.appendChild(actionChip('이미지 불러오기', () => fileInput.click(), true));
+      contextBar.appendChild(slider('투명도', 5, 100, 1, Math.round(board ? board.underlayOpacity * 100 : 50), v => {
+        if (!board) return;
+        board.underlayOpacity = v / 100;
+        invalidate();
+        renderLayers();
+        markChanged();
+      }, v => v + '%'));
+      contextBar.appendChild(hint('밑그림을 톡 눌러 선택하면 옮기거나 돌릴 수 있어요 · 다운로드엔 안 나와요'));
+    } else if (t === 'blur') {
+      contextBar.appendChild(slider('강도', 1, 40, 1, tool.blurStrength, v => { tool.blurStrength = v; storage.set(TOOL_KEY, tool); }));
+      contextBar.appendChild(hint('칠한 영역 아래에 있는 그림이 흐려져요'));
     }
   }
 
@@ -2254,7 +3142,7 @@
     closePastePopup();
   }
 
-  // 기본 캔버스 영역 안에 그려진 부분만 저장 (밖으로 나간 선은 잘림)
+  // 기본 캔버스 영역 안에 그려진 부분만 저장 (밖으로 나간 선은 잘림, 밑그림·가상 선 제외)
   function exportPNG(transparent) {
     if (!project) return;
     const main = project.boards[0];
@@ -2266,7 +3154,7 @@
       x.fillStyle = '#fff';
       x.fillRect(0, 0, c.width, c.height);
     }
-    drawNodes(x, main.layers, null);
+    drawNodes(x, main.layers, null, 'export');
     const fileName = (project.name.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'drawing') + '.png';
     c.toBlob(blob => {
       if (!blob) { toast('이미지를 만들지 못했어요'); return; }
@@ -2283,7 +3171,10 @@
   }
 
   // ================= 키보드 =================
+  const HOTKEYS = { p: 'pen', m: 'magic', r: 'shape', c: 'curve', l: 'guide', f: 'fill', e: 'eraser', b: 'blur', s: 'select', v: 'paste', u: 'underlay' };
+
   window.addEventListener('keydown', e => {
+    if (e.key === 'Shift') shiftDown = true;
     if (!project || editor.hidden) return;
     if (e.target instanceof HTMLInputElement && e.target.type !== 'range') return;
     const mod = e.ctrlKey || e.metaKey;
@@ -2298,13 +3189,20 @@
     }
     else if (mod) return;
     else if (e.code === 'Space' && !e.repeat) { spaceDown = true; stage.classList.add('panning'); e.preventDefault(); }
-    else if (key === 'escape') { closePopups(); if (selection.size) setSelection([]); }
-    else if ((key === 'delete' || key === 'backspace') && selection.size) { e.preventDefault(); deleteSelection(); }
-    else if (!e.repeat && { p: 1, m: 1, e: 1, s: 1, v: 1 }[key]) {
-      setTool({ p: 'pen', m: 'magic', e: 'eraser', s: 'select', v: 'paste' }[key]);
+    else if (key === 'enter') {
+      if (polyDraft) commitPolygon(true);
+      else if (curveDraft) commitCurve(false);
     }
+    else if (key === 'escape') {
+      closePopups();
+      if (polyDraft || curveDraft) { polyDraft = null; curveDraft = null; buildContextBar(); requestRender(); }
+      else if (selection.size) setSelection([]);
+    }
+    else if ((key === 'delete' || key === 'backspace') && selection.size) { e.preventDefault(); deleteSelection(); }
+    else if (!e.repeat && HOTKEYS[key]) setTool(HOTKEYS[key]);
   });
   window.addEventListener('keyup', e => {
+    if (e.key === 'Shift') shiftDown = false;
     if (e.code === 'Space') { spaceDown = false; stage.classList.remove('panning'); }
   });
 

@@ -415,5 +415,180 @@ window.Shapes = (() => {
     return res ? { points: toFlat(res.points), label: res.label } : null;
   }
 
-  return { recognize };
+  // ================= 도형 도구 =================
+  function mulberry(seed) {
+    return () => {
+      seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // 부드러운 1차원 노이즈 (-1 ~ 1)
+  function valueNoise(rand) {
+    const n = 512;
+    const table = Array.from({ length: n }, rand);
+    return x => {
+      const i = Math.floor(x), f = x - i;
+      const a = table[((i % n) + n) % n], b = table[(((i + 1) % n) + n) % n];
+      const u = f * f * (3 - 2 * f);
+      return (a + (b - a) * u) * 2 - 1;
+    };
+  }
+
+  function regular(cx, cy, rx, ry, n, rot = -Math.PI / 2) {
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const a = rot + i * TAU / n;
+      out.push(P(cx + rx * Math.cos(a), cy + ry * Math.sin(a)));
+    }
+    return out;
+  }
+
+  /**
+   * 도형 꼭짓점 만들기
+   * @param {string} type
+   * @param {{x,y}} a 드래그 시작점 (월드 좌표)
+   * @param {{x,y}} b 드래그 끝점
+   * @param {{square?:boolean}} opts
+   * @returns {{pts:{x,y}[], closed:boolean}}
+   */
+  function generate(type, a, b, opts = {}) {
+    if (type === 'line') return { pts: [a, b], closed: false };
+    if (type === 'arrow') {
+      const len = dist(a, b);
+      const ang = Math.atan2(b.y - a.y, b.x - a.x);
+      const head = Math.min(len * 0.35, 18 + len * 0.12);
+      const w1 = P(b.x + head * Math.cos(ang + Math.PI * 0.82), b.y + head * Math.sin(ang + Math.PI * 0.82));
+      const w2 = P(b.x + head * Math.cos(ang - Math.PI * 0.82), b.y + head * Math.sin(ang - Math.PI * 0.82));
+      return { pts: [a, b, w1, b, w2], closed: false };
+    }
+    let bx = b.x, by = b.y;
+    if (opts.square) {
+      const side = Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+      bx = a.x + Math.sign(b.x - a.x || 1) * side;
+      by = a.y + Math.sign(b.y - a.y || 1) * side;
+    }
+    const x0 = Math.min(a.x, bx), x1 = Math.max(a.x, bx);
+    const y0 = Math.min(a.y, by), y1 = Math.max(a.y, by);
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, rx = (x1 - x0) / 2, ry = (y1 - y0) / 2;
+    let pts;
+    switch (type) {
+      case 'rect':
+        pts = [P(x0, y0), P(x1, y0), P(x1, y1), P(x0, y1)];
+        break;
+      case 'roundrect': {
+        const r = Math.min(rx, ry) * 0.35;
+        pts = [];
+        const corners = [[x1 - r, y0 + r, -Math.PI / 2], [x1 - r, y1 - r, 0], [x0 + r, y1 - r, Math.PI / 2], [x0 + r, y0 + r, Math.PI]];
+        for (const [ccx, ccy, a0] of corners) {
+          for (let i = 0; i <= 8; i++) {
+            const t = a0 + (Math.PI / 2) * i / 8;
+            pts.push(P(ccx + r * Math.cos(t), ccy + r * Math.sin(t)));
+          }
+        }
+        break;
+      }
+      case 'ellipse': {
+        const perim = Math.PI * (3 * (rx + ry) - Math.sqrt((3 * rx + ry) * (rx + 3 * ry)));
+        pts = regular(cx, cy, rx, ry, Math.max(32, Math.min(720, Math.ceil(perim / 3))));
+        break;
+      }
+      case 'triangle':
+        pts = [P(cx, y0), P(x1, y1), P(x0, y1)];
+        break;
+      case 'diamond':
+        pts = [P(cx, y0), P(x1, cy), P(cx, y1), P(x0, cy)];
+        break;
+      case 'pentagon':
+        pts = regular(cx, cy, rx, ry, 5);
+        break;
+      case 'hexagon':
+        pts = regular(cx, cy, rx, ry, 6, 0);
+        break;
+      case 'star':
+        pts = [];
+        for (let i = 0; i < 10; i++) {
+          const k = i % 2 ? 0.42 : 1;
+          const t = -Math.PI / 2 + i * Math.PI / 5;
+          pts.push(P(cx + rx * k * Math.cos(t), cy + ry * k * Math.sin(t)));
+        }
+        break;
+      default:
+        pts = [P(x0, y0), P(x1, y0), P(x1, y1), P(x0, y1)];
+    }
+    return { pts, closed: true };
+  }
+
+  /**
+   * 인위적 노이즈: 값이 클수록 손으로 그린 것처럼 울퉁불퉁해짐
+   * @param {{x,y}[]} pts 꼭짓점
+   * @param {boolean} closed
+   * @param {number} amount 0 ~ 100
+   * @param {number} seed
+   */
+  function roughen(pts, closed, amount, seed) {
+    let path = densify(closed ? [...pts, pts[0]] : pts, 3);
+    if (!amount || path.length < 2) return path;
+    const L = pathLength(path);
+    const k = amount / 100;
+
+    // 닫힌 도형은 손으로 그릴 때처럼 끝이 시작점을 살짝 지나가게
+    if (closed) {
+      let over = Math.min(L * 0.1, 8 + L * 0.03) * k;
+      for (let i = 1; i < path.length && over > 0; i++) {
+        const d = dist(path[i - 1], path[i]);
+        if (d >= over) {
+          const t = over / d;
+          path.push(P(path[i - 1].x + (path[i].x - path[i - 1].x) * t, path[i - 1].y + (path[i].y - path[i - 1].y) * t));
+          break;
+        }
+        path.push(path[i]);
+        over -= d;
+      }
+    }
+
+    const rand = mulberry(seed);
+    const n1 = valueNoise(rand), n2 = valueNoise(rand), n3 = valueNoise(rand), n4 = valueNoise(rand);
+    const A = k * (1 + Math.sqrt(L) * 0.32);
+    const out = [];
+    let s = 0;
+    for (let i = 0; i < path.length; i++) {
+      if (i) s += dist(path[i - 1], path[i]);
+      const p = path[i];
+      const prev = path[Math.max(0, i - 1)], next = path[Math.min(path.length - 1, i + 1)];
+      let nx = -(next.y - prev.y), ny = next.x - prev.x;
+      const nl = Math.hypot(nx, ny) || 1;
+      nx /= nl; ny /= nl;
+      const d = A * (0.7 * n1(s / 70) + 0.3 * n2(s / 18));
+      const dx = A * 0.6 * n3(s / 260), dy = A * 0.6 * n4(s / 260 + 50);
+      out.push(P(p.x + nx * d + dx, p.y + ny * d + dy));
+    }
+    return out;
+  }
+
+  // ================= 베지에 곡선 =================
+  /**
+   * @param {{x,y,hx,hy}[]} anchors hx,hy 는 나가는 손잡이 (들어오는 손잡이는 반대 방향)
+   */
+  function bezier(anchors, closed) {
+    const n = anchors.length;
+    if (!n) return [];
+    const out = [P(anchors[0].x, anchors[0].y)];
+    const segs = closed ? n : n - 1;
+    for (let i = 0; i < segs; i++) {
+      const a = anchors[i], b = anchors[(i + 1) % n];
+      const p0 = P(a.x, a.y), p1 = P(a.x + a.hx, a.y + a.hy), p2 = P(b.x - b.hx, b.y - b.hy), p3 = P(b.x, b.y);
+      const steps = Math.max(4, Math.ceil((dist(p0, p1) + dist(p1, p2) + dist(p2, p3)) / 3));
+      for (let s = 1; s <= steps; s++) {
+        const t = s / steps, u = 1 - t;
+        const w0 = u * u * u, w1 = 3 * u * u * t, w2 = 3 * u * t * t, w3 = t * t * t;
+        out.push(P(w0 * p0.x + w1 * p1.x + w2 * p2.x + w3 * p3.x, w0 * p0.y + w1 * p1.y + w2 * p2.y + w3 * p3.y));
+      }
+    }
+    return out;
+  }
+
+  return { recognize, generate, roughen, bezier, toFlat };
 })();
