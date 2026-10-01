@@ -1228,6 +1228,12 @@
       for (const R of symMatrices(sym)) {
         const BR = sc.base.multiply(new DOMMatrix(R));
         c.save();
+        // 반전된 결과도 대칭 구역 안까지만
+        c.setTransform(sc.base);
+        c.beginPath();
+        tracePolys(c, [sym.region]);
+        c.clip();
+        // 원본에서 대칭 구역 안에 있는 부분만 반전
         c.setTransform(BR);
         c.beginPath();
         tracePolys(c, [sym.region]);
@@ -1257,6 +1263,8 @@
 
   // 그리는 중인 레이어 미리보기 (대칭 사본 포함)
   function drawPreview(c, node) {
+    // 그리는 중에는 점이 계속 늘어나므로 영역 상자를 매번 새로 계산
+    bboxCache.delete(node);
     applyView(c);
     drawLeaf(c, node, null, 'editor');
     if (!MIRRORABLE.has(node.kind)) return;
@@ -1851,6 +1859,7 @@
   }
 
   function addLayer(node) {
+    bboxCache.delete(node);
     checkpoint();
     targetList().push(node);
     strokesChanged();
