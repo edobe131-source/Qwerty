@@ -639,6 +639,20 @@
       const a = Math.cos(2 * phi), b = Math.sin(2 * phi);
       return [a, b, b, -a, cx - a * cx - b * cy, cy - b * cx + a * cy];
     },
+    invert(m) {
+      const det = m[0] * m[3] - m[1] * m[2] || 1e-12;
+      return [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det, (m[2] * m[5] - m[3] * m[4]) / det, (m[1] * m[4] - m[0] * m[5]) / det];
+    },
+    fromCtx: t => [t.a, t.b, t.c, t.d, t.e, t.f],
+    // 상자 [x0,y0,x1,y1] 를 변환한 뒤의 감싸는 상자
+    box(m, b) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const [x, y] of [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]]) {
+        const X = m[0] * x + m[2] * y + m[4], Y = m[1] * x + m[3] * y + m[5];
+        x0 = Math.min(x0, X); y0 = Math.min(y0, Y); x1 = Math.max(x1, X); y1 = Math.max(y1, Y);
+      }
+      return [x0, y0, x1, y1];
+    },
     // A ∘ B (B 를 먼저 적용)
     multiply: (A, B) => [
       A[0] * B[0] + A[2] * B[1], A[1] * B[0] + A[3] * B[1],
@@ -1012,8 +1026,9 @@
   }
 
   // 투명도, 합성, 영역 지우개 구멍까지 적용해서 그림
-  function drawVisible(c, n, extraErase) {
-    const def = n.kind === 'stroke' ? (PEN[n.pen] || PEN.basic) : {};
+  // raw: 펜의 투명도/합성 없이 (반전 사본을 따로 그린 뒤 한 번에 적용할 때)
+  function drawVisible(c, n, extraErase, raw) {
+    const def = !raw && n.kind === 'stroke' ? (PEN[n.pen] || PEN.basic) : {};
     const erases = extraErase ? [...(n.erase || []), extraErase] : n.erase;
     if (erases && erases.length) { drawErased(c, n, def, erases); return; }
     c.save();
@@ -1212,34 +1227,65 @@
     c.restore();
   }
 
-  // 반전된 사본 그리기: 기준 변환(base) 기준으로 R ∘ (현재 변환)
+  // 반전된 사본 그리기
+  // 브라우저마다 다르게 동작할 수 있는 clip() 대신, 별도 캔버스에 그린 뒤
+  // 대칭 구역 모양으로 잘라(destination-in) 붙인다 (영역 지우개·흐림과 같은 방식)
+  const mirrorCanvas = document.createElement('canvas');
+  const mirrorCtx = mirrorCanvas.getContext('2d');
+
+  function fillPoly(c, m, poly) {
+    c.setTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
+    c.beginPath();
+    tracePolys(c, [poly]);
+    c.fill();
+  }
+
   function drawMirrors(c, n, extraErase, mode, sc) {
-    const T = c.getTransform();
-    const M = sc.base.inverse().multiply(T);
-    const b = leafBBox(n);
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const [x, y] of [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]]) {
-      const X = M.a * x + M.c * y + M.e, Y = M.b * x + M.d * y + M.f;
-      x0 = Math.min(x0, X); y0 = Math.min(y0, Y); x1 = Math.max(x1, X); y1 = Math.max(y1, Y);
-    }
+    const base = sc.base;
+    const T = Mat.fromCtx(c.getTransform());
+    const M = Mat.multiply(Mat.invert(base), T); // 레이어가 끌려 움직이는 중이면 그 변환 (월드 기준)
+    const wb = Mat.box(M, leafBBox(n));
+    const W = c.canvas.width, H = c.canvas.height;
+    const def = mode !== 'walls' && n.kind === 'stroke' ? (PEN[n.pen] || PEN.basic) : {};
     for (const sym of sc.syms) {
       const rb = leafBBox(sym);
-      if (x1 < rb[0] || x0 > rb[2] || y1 < rb[1] || y0 > rb[3]) continue;
+      if (wb[2] < rb[0] || wb[0] > rb[2] || wb[3] < rb[1] || wb[1] > rb[3]) continue;
+      const regDev = Mat.box(base, rb);
       for (const R of symMatrices(sym)) {
-        const BR = sc.base.multiply(new DOMMatrix(R));
+        // 그릴 범위: (반전된 레이어) ∩ (대칭 구역) ∩ (캔버스), 화면 픽셀 기준
+        const leafDev = Mat.box(Mat.multiply(base, R), wb);
+        const rx = Math.max(0, Math.floor(Math.max(regDev[0], leafDev[0])));
+        const ry = Math.max(0, Math.floor(Math.max(regDev[1], leafDev[1])));
+        const rw = Math.min(W, Math.ceil(Math.min(regDev[2], leafDev[2]))) - rx;
+        const rh = Math.min(H, Math.ceil(Math.min(regDev[3], leafDev[3]))) - ry;
+        if (rw <= 0 || rh <= 0) continue;
+        if (mirrorCanvas.width < rw || mirrorCanvas.height < rh) {
+          mirrorCanvas.width = Math.max(mirrorCanvas.width, rw);
+          mirrorCanvas.height = Math.max(mirrorCanvas.height, rh);
+        }
+        const x = mirrorCtx;
+        x.setTransform(1, 0, 0, 1, 0, 0);
+        x.globalAlpha = 1;
+        x.globalCompositeOperation = 'source-over';
+        x.clearRect(0, 0, rw, rh);
+        const off = m => [m[0], m[1], m[2], m[3], m[4] - rx, m[5] - ry];
+        // 1) 반전해서 그리기
+        const D = off(Mat.multiply(base, Mat.multiply(R, M)));
+        x.setTransform(D[0], D[1], D[2], D[3], D[4], D[5]);
+        drawLeaf(x, n, extraErase, mode, true);
+        // 2) 원본 중 대칭 구역 안에 있던 부분만 남김 (= 구역을 반전한 모양으로 자름)
+        x.globalCompositeOperation = 'destination-in';
+        x.fillStyle = '#000';
+        fillPoly(x, off(base), transformPoints(sym.region, R));
+        // 3) 반전된 결과도 대칭 구역 안까지만
+        fillPoly(x, off(base), sym.region);
+        x.globalCompositeOperation = 'source-over';
+        // 4) 붙이기
         c.save();
-        // 반전된 결과도 대칭 구역 안까지만
-        c.setTransform(sc.base);
-        c.beginPath();
-        tracePolys(c, [sym.region]);
-        c.clip();
-        // 원본에서 대칭 구역 안에 있는 부분만 반전
-        c.setTransform(BR);
-        c.beginPath();
-        tracePolys(c, [sym.region]);
-        c.clip();
-        c.setTransform(BR.multiply(M));
-        drawLeaf(c, n, extraErase, mode);
+        c.setTransform(1, 0, 0, 1, 0, 0);
+        if (def.alpha) c.globalAlpha *= def.alpha;
+        if (def.blend) c.globalCompositeOperation = def.blend;
+        c.drawImage(mirrorCanvas, 0, 0, rw, rh, rx, ry, rw, rh);
         c.restore();
       }
     }
@@ -1269,11 +1315,11 @@
     drawLeaf(c, node, null, 'editor');
     if (!MIRRORABLE.has(node.kind)) return;
     const syms = collectSyms();
-    if (syms.length) drawMirrors(c, node, null, 'editor', { syms, base: c.getTransform() });
+    if (syms.length) drawMirrors(c, node, null, 'editor', { syms, base: Mat.fromCtx(c.getTransform()) });
   }
 
   // mode: 'editor' 작업 화면 / 'export' 저장 이미지 / 'thumb' 레이어 미리보기 / 'walls' 채우기 경계
-  function drawLeaf(c, n, extraErase, mode) {
+  function drawLeaf(c, n, extraErase, mode, raw) {
     if (mode === 'walls') {
       if (n.kind === 'guide') {
         const t = c.getTransform();
@@ -1295,12 +1341,12 @@
     if (n.kind === 'guide') drawGuide(c, n, mode);
     else if (n.kind === 'symmetry') drawSymmetry(c, n, mode);
     else if (n.kind === 'blur') { if (mode === 'thumb') drawBlurMask(c, n); else applyBlur(c, n); }
-    else drawVisible(c, n, extraErase);
+    else drawVisible(c, n, extraErase, raw);
   }
 
   // 레이어 트리 그리기 (뒤 → 앞)
   function drawNodes(c, nodes, lv, mode, sc) {
-    if (!sc) sc = { syms: [], base: c.getTransform() };
+    if (!sc) sc = { syms: [], base: Mat.fromCtx(c.getTransform()) };
     for (const n of nodes) {
       if (!n.visible) continue;
       if (lv && lv.hidden.has(n.id)) continue;
@@ -3660,7 +3706,7 @@
   // ================= 시작 =================
   // 화면에 버전을 보여 줘서 태블릿이 최신 코드를 받았는지 확인할 수 있게 함
   // (고칠 때마다 index.html 의 ?v= 값과 함께 올림)
-  const APP_VERSION = '2026.10.01b';
+  const APP_VERSION = '2026.10.01c';
   $('#app-version').textContent = 'v' + APP_VERSION;
   showScreen('home');
   renderHome();
