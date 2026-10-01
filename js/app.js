@@ -1,0 +1,3713 @@
+(() => {
+  'use strict';
+
+  // ================= 저장소 =================
+  const INDEX_KEY = 'qwerty.projects';
+  const TOOL_KEY = 'qwerty.tool';
+  const CLIP_KEY = 'qwerty.clipboard';
+  const projectKey = id => 'qwerty.project.' + id;
+
+  const storage = {
+    get(key, fallback) {
+      try {
+        const v = localStorage.getItem(key);
+        return v ? JSON.parse(v) : fallback;
+      } catch {
+        return fallback;
+      }
+    },
+    set(key, value) {
+      try {
+        localStorage.setItem(key, JSON.stringify(value));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    remove(key) {
+      try { localStorage.removeItem(key); } catch { /* 무시 */ }
+    },
+  };
+
+  const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const round1 = v => Math.round(v * 10) / 10;
+  const round2 = v => Math.round(v * 100) / 100;
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const $ = sel => document.querySelector(sel);
+  const deepCopy = v => JSON.parse(JSON.stringify(v));
+
+  const ICONS = {
+    x: '<svg class="ico" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+    plus: '<svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
+    trash: '<svg class="ico" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
+    eye: '<svg class="ico" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>',
+    eyeOff: '<svg class="ico" viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3.2 4.2M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>',
+    caret: '<svg class="ico" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>',
+    folder: '<svg class="ico" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+  };
+
+  // ================= 비율 프리셋 =================
+  const RATIOS = [
+    { id: '1:1', label: '1:1', w: 1, h: 1 },
+    { id: '4:3', label: '4:3', w: 4, h: 3 },
+    { id: '3:4', label: '3:4', w: 3, h: 4 },
+    { id: '16:9', label: '16:9', w: 16, h: 9 },
+    { id: '9:16', label: '9:16', w: 9, h: 16 },
+    { id: '3:2', label: '3:2', w: 3, h: 2 },
+    { id: '2:3', label: '2:3', w: 2, h: 3 },
+    { id: 'a4p', label: 'A4 세로', w: 210, h: 297 },
+    { id: 'a4l', label: 'A4 가로', w: 297, h: 210 },
+    { id: 'custom', label: '커스텀' },
+  ];
+
+  function sizeFor(rw, rh, longSide) {
+    if (rw >= rh) return [longSide, Math.max(1, Math.round(longSide * rh / rw))];
+    return [Math.max(1, Math.round(longSide * rw / rh)), longSide];
+  }
+
+  // ================= 펜 / 도구 / 도형 종류 =================
+  const PENS = [
+    { id: 'basic', label: '기본 펜', size: 8 },
+    { id: 'brush', label: '붓펜', size: 16 },
+    { id: 'calligraphy', label: '캘리그라피', size: 18 },
+    { id: 'pencil', label: '연필', size: 5 },
+    { id: 'marker', label: '마커', size: 22, alpha: 0.55 },
+    { id: 'highlighter', label: '형광펜', size: 34, alpha: 0.38, blend: 'multiply' },
+  ];
+  const PEN = Object.fromEntries(PENS.map(p => [p.id, p]));
+  const NIB_ANGLE = -Math.PI / 4;
+
+  const TOOLS = {
+    pen: '펜',
+    magic: '매직 펜',
+    shape: '도형',
+    curve: '곡선',
+    guide: '가상 선',
+    fill: '채우기',
+    eraser: '지우개',
+    blur: '흐림',
+    select: '영역 선택',
+    paste: '붙여넣기',
+    underlay: '밑그림',
+    symmetry: '자동 대칭',
+  };
+
+  const SHAPES = [
+    { id: 'rect', label: '사각형' },
+    { id: 'roundrect', label: '둥근 사각형' },
+    { id: 'ellipse', label: '타원' },
+    { id: 'triangle', label: '삼각형' },
+    { id: 'diamond', label: '마름모' },
+    { id: 'pentagon', label: '오각형' },
+    { id: 'hexagon', label: '육각형' },
+    { id: 'star', label: '별' },
+    { id: 'line', label: '직선' },
+    { id: 'arrow', label: '화살표' },
+    { id: 'polygon', label: '다각형' },
+  ];
+
+  // 레이어 지우개는 크기 조절 없이 화면 기준으로 항상 같은 크기
+  const LAYER_ERASER_PX = 12;
+
+  // ================= 홈 화면 =================
+  const home = $('#home');
+  const editor = $('#editor');
+  const grid = $('#project-grid');
+
+  function showScreen(name) {
+    home.hidden = name !== 'home';
+    editor.hidden = name !== 'editor';
+  }
+
+  function formatDate(ts) {
+    const d = new Date(ts);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}.${pad(d.getMonth() + 1)}.${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function renderHome() {
+    const list = storage.get(INDEX_KEY, []).sort((a, b) => b.updatedAt - a.updatedAt);
+    grid.innerHTML = '';
+    $('#empty').hidden = list.length > 0;
+    for (const meta of list) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.tabIndex = 0;
+      card.setAttribute('role', 'button');
+
+      const thumb = document.createElement('div');
+      thumb.className = 'card-thumb';
+      if (meta.thumb) {
+        const img = document.createElement('img');
+        img.src = meta.thumb;
+        img.alt = '';
+        thumb.appendChild(img);
+      }
+
+      const body = document.createElement('div');
+      body.className = 'card-body';
+      const name = document.createElement('div');
+      name.className = 'card-name';
+      name.textContent = meta.name;
+      const info = document.createElement('div');
+      info.className = 'card-meta';
+      info.textContent = `${meta.width} × ${meta.height} · ${formatDate(meta.updatedAt)}`;
+      body.append(name, info);
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'icon-btn card-del';
+      del.title = '삭제';
+      del.innerHTML = ICONS.trash;
+      del.addEventListener('click', e => {
+        e.stopPropagation();
+        if (!confirm(`'${meta.name}' 프로젝트를 삭제할까요? 되돌릴 수 없어요.`)) return;
+        deleteProject(meta.id);
+        renderHome();
+      });
+
+      card.append(thumb, body, del);
+      card.addEventListener('click', () => openProject(meta.id));
+      card.addEventListener('keydown', e => { if (e.key === 'Enter') openProject(meta.id); });
+      grid.appendChild(card);
+    }
+  }
+
+  function deleteProject(id) {
+    storage.remove(projectKey(id));
+    storage.set(INDEX_KEY, storage.get(INDEX_KEY, []).filter(m => m.id !== id));
+  }
+
+  // ================= 새 프로젝트 대화상자 =================
+  const modal = $('#modal-new');
+  const ratioGrid = $('#ratio-grid');
+  const newDlg = { ratio: '4:3', res: 2048 };
+
+  function buildRatioGrid() {
+    ratioGrid.innerHTML = '';
+    for (const r of RATIOS) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'ratio';
+      b.dataset.id = r.id;
+      const shape = document.createElement('span');
+      shape.className = 'ratio-shape';
+      const inner = document.createElement('span');
+      if (r.id === 'custom') {
+        inner.className = 'custom-shape';
+      } else {
+        const [w, h] = sizeFor(r.w, r.h, 32);
+        inner.style.width = w + 'px';
+        inner.style.height = h + 'px';
+      }
+      shape.appendChild(inner);
+      const label = document.createElement('span');
+      label.textContent = r.label;
+      b.append(shape, label);
+      b.addEventListener('click', () => { newDlg.ratio = r.id; syncNewDialog(); });
+      ratioGrid.appendChild(b);
+    }
+  }
+
+  function newDialogSize() {
+    let rw, rh;
+    if (newDlg.ratio === 'custom') {
+      rw = parseFloat($('#custom-w').value);
+      rh = parseFloat($('#custom-h').value);
+      if (!(rw > 0) || !(rh > 0)) return null;
+    } else {
+      const r = RATIOS.find(x => x.id === newDlg.ratio);
+      rw = r.w; rh = r.h;
+    }
+    const [w, h] = sizeFor(rw, rh, newDlg.res);
+    if (w < 16 || h < 16) return null;
+    return [w, h];
+  }
+
+  function syncNewDialog() {
+    for (const b of ratioGrid.children) b.classList.toggle('active', b.dataset.id === newDlg.ratio);
+    for (const b of $('#res-group').children) b.classList.toggle('active', Number(b.dataset.res) === newDlg.res);
+    $('#custom-fields').hidden = newDlg.ratio !== 'custom';
+    const size = newDialogSize();
+    $('#size-preview').textContent = size ? `${size[0]} × ${size[1]} px` : '비율 값을 확인해 주세요';
+  }
+
+  function openNewDialog() {
+    const count = storage.get(INDEX_KEY, []).length;
+    $('#new-name').value = `제목 없음 ${count + 1}`;
+    syncNewDialog();
+    modal.hidden = false;
+  }
+
+  function closeNewDialog() { modal.hidden = true; }
+
+  buildRatioGrid();
+  $('#btn-new').addEventListener('click', openNewDialog);
+  $('#btn-new-close').addEventListener('click', closeNewDialog);
+  $('#btn-new-cancel').addEventListener('click', closeNewDialog);
+  modal.addEventListener('pointerdown', e => { if (e.target === modal) closeNewDialog(); });
+  $('#custom-w').addEventListener('input', syncNewDialog);
+  $('#custom-h').addEventListener('input', syncNewDialog);
+  for (const b of $('#res-group').children) {
+    b.addEventListener('click', () => { newDlg.res = Number(b.dataset.res); syncNewDialog(); });
+  }
+
+  $('#form-new').addEventListener('submit', e => {
+    e.preventDefault();
+    const size = newDialogSize();
+    if (!size) { toast('비율 값을 확인해 주세요'); return; }
+    const name = $('#new-name').value.trim() || '제목 없음';
+    const now = Date.now();
+    const p = {
+      id: uid(),
+      version: 3,
+      name,
+      width: size[0],
+      height: size[1],
+      createdAt: now,
+      updatedAt: now,
+      auxCounter: 0,
+      boards: [newBoard('main', 'main', '기본 캔버스')],
+    };
+    if (!storage.set(projectKey(p.id), p)) { toast('저장 공간이 부족해 프로젝트를 만들 수 없어요'); return; }
+    writeIndex(p, null);
+    closeNewDialog();
+    openProject(p.id);
+  });
+
+  function newBoard(id, type, name) {
+    return { id, type, name, layers: [], underlays: [], underlayOpacity: 0.5, counters: {}, nextNum: 1, nextGroup: 1, autoGroupId: null, view: null };
+  }
+
+  // 예전 형식 프로젝트를 지금 형식으로 바꿈
+  function migrate(p) {
+    for (const b of p.boards) {
+      if (!b.layers) {
+        b.layers = (b.strokes || []).map(s => ({ ...s, kind: 'stroke', pen: s.pen || 'basic' }));
+        delete b.strokes;
+      }
+      if (!b.nextGroup) b.nextGroup = 1;
+      if (!b.underlays) b.underlays = [];
+      if (b.underlayOpacity == null) b.underlayOpacity = 0.5;
+      if (!b.counters) b.counters = {};
+      if (b.autoGroupId === undefined) b.autoGroupId = null;
+    }
+    p.version = 3;
+    return p;
+  }
+
+  // ================= 작업 화면 상태 =================
+  const stage = $('#stage');
+  const canvas = $('#board');
+  const ctx = canvas.getContext('2d');
+  const cache = document.createElement('canvas');
+  const cctx = cache.getContext('2d');
+  const ucanvas = document.createElement('canvas'); // 밑그림 합성용
+  const uctx = ucanvas.getContext('2d');
+  const scratch = document.createElement('canvas');
+  const sctx = scratch.getContext('2d');
+
+  const PAGE_BG = '#e4e4e9';
+  const AUX_BG = '#f7f7f4';
+  const ACCENT = '#4f5bd5';
+  const GUIDE_COLOR = '#12a3c9';
+  const SYM_COLOR = '#8e4ec6';
+  const MIN_ZOOM = 0.02;
+  const MAX_ZOOM = 40;
+
+  const penDefaults = Object.fromEntries(PENS.map(p => [p.id, p.size]));
+  const savedTool = storage.get(TOOL_KEY, {});
+  const tool = {
+    current: 'pen',
+    color: '#1b1b1f',
+    pen: 'basic',
+    eraserMode: 'area',
+    eraserSize: 30,
+    selectMode: 'lasso',
+    guideMode: 'line',
+    shape: 'rect',
+    shapeFilled: false,
+    shapeSquare: false,
+    noise: 0,
+    curveFilled: false,
+    blurSize: 40,
+    blurStrength: 8,
+    symShape: 'rect',
+    symH: false,
+    symV: true,
+    ...savedTool,
+    penSizes: { ...penDefaults, ...(savedTool.penSizes || {}) },
+  };
+  if (!TOOLS[tool.current]) tool.current = 'pen';
+  if (!PEN[tool.pen]) tool.pen = 'basic';
+
+  let project = null;
+  let board = null;
+  let dpr = 1, cw = 0, ch = 0;
+  let cacheDirty = true;
+  let rafId = 0;
+  let penSeen = false;
+  let layersOpen = false;
+  let histories = new Map();
+  let expanded = new Set();
+
+  // 선택 상태
+  let selection = new Set();
+  let selBox = null; // { cx, cy, hw, hh, angle }
+
+  // 여러 번 눌러 만드는 도형 (다각형 / 베지에 곡선)
+  let polyDraft = null;  // { pts:[{x,y}], seed }
+  let curveDraft = null; // { anchors:[{x,y,hx,hy}] }
+
+  // 그리는 중에만 쓰는 임시 상태
+  const live = { hidden: new Set(), erase: null, transform: null };
+
+  // 저장하지 않는 런타임 캐시 (레이어 객체는 바뀌지 않으므로 객체 기준으로 캐시)
+  const bboxCache = new WeakMap();
+  const thumbCache = new WeakMap();
+
+  let clipboard = storage.get(CLIP_KEY, []);
+
+  // ================= 레이어 트리 도우미 =================
+  // 레이어 종류(kind):
+  //   stroke 선 / fill 채우기 면 / guide 가상 선 / blur 흐림 영역 / image 이미지 / group 그룹
+  // board.layers 는 그림, board.underlays 는 밑그림(맨 아래, 반투명, 다운로드 안 됨)
+  // 그룹이 아닌 레이어 객체는 만들어진 뒤 바꾸지 않고 새 객체로 교체한다 (실행 취소 스냅샷 공유)
+
+  function roots() {
+    return [board.layers, board.underlays];
+  }
+
+  function locateIn(id, list, parent) {
+    for (let i = 0; i < list.length; i++) {
+      const n = list[i];
+      if (n.id === id) return { node: n, list, index: i, parent };
+      if (n.kind === 'group') {
+        const r = locateIn(id, n.children, n);
+        if (r) return r;
+      }
+    }
+    return null;
+  }
+
+  function locate(id) {
+    for (const list of roots()) {
+      const r = locateIn(id, list, null);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  function pathIn(id, list, trail) {
+    for (const n of list) {
+      if (n.id === id) return [...trail, n];
+      if (n.kind === 'group') {
+        const r = pathIn(id, n.children, [...trail, n]);
+        if (r) return r;
+      }
+    }
+    return null;
+  }
+
+  function pathTo(id) {
+    for (const list of roots()) {
+      const r = pathIn(id, list, []);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  function isUnderlay(id) {
+    return !!locateIn(id, board.underlays, null);
+  }
+
+  function leavesOf(node, out = [], visibleOnly = false) {
+    if (visibleOnly && !node.visible) return out;
+    if (node.kind === 'group') for (const c of node.children) leavesOf(c, out, visibleOnly);
+    else out.push(node);
+    return out;
+  }
+
+  function allLeaves(visibleOnly = true) {
+    const out = [];
+    for (const n of board.layers) leavesOf(n, out, visibleOnly);
+    return out;
+  }
+
+  function countLeaves(list) {
+    let n = 0;
+    for (const x of list) n += x.kind === 'group' ? countLeaves(x.children) : 1;
+    return n;
+  }
+
+  function orderIndex() {
+    const map = new Map();
+    let i = 0;
+    const walk = list => {
+      for (const n of list) {
+        map.set(n.id, i++);
+        if (n.kind === 'group') walk(n.children);
+      }
+    };
+    walk(board.underlays);
+    walk(board.layers);
+    return map;
+  }
+
+  function cloneTree(list) {
+    return list.map(n => n.kind === 'group' ? { ...n, children: cloneTree(n.children) } : n);
+  }
+
+  function replaceNode(id, fn) {
+    const loc = locate(id);
+    if (loc) loc.list[loc.index] = fn(loc.node);
+  }
+
+  function removeNodes(ids) {
+    const prune = list => {
+      for (let i = list.length - 1; i >= 0; i--) {
+        const n = list[i];
+        if (ids.has(n.id)) { list.splice(i, 1); continue; }
+        if (n.kind === 'group') {
+          prune(n.children);
+          if (!n.children.length && n.id !== board.autoGroupId) list.splice(i, 1);
+        }
+      }
+    };
+    for (const list of roots()) prune(list);
+  }
+
+  function nextName(prefix) {
+    if (prefix === '선') return '선 ' + board.nextNum++;
+    const c = board.counters;
+    c[prefix] = (c[prefix] || 0) + 1;
+    return `${prefix} ${c[prefix]}`;
+  }
+
+  // ================= 기하 도우미 =================
+  function distPtSeg(px, py, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const l2 = dx * dx + dy * dy;
+    let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0;
+    t = clamp(t, 0, 1);
+    return Math.hypot(px - ax - t * dx, py - ay - t * dy);
+  }
+
+  function segsIntersect(ax, ay, bx, by, cx, cy, dx, dy) {
+    const d1 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx);
+    const d2 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx);
+    const d3 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    const d4 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax);
+    return ((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0));
+  }
+
+  function segSegDist(ax, ay, bx, by, cx, cy, dx, dy) {
+    if (segsIntersect(ax, ay, bx, by, cx, cy, dx, dy)) return 0;
+    return Math.min(
+      distPtSeg(ax, ay, cx, cy, dx, dy), distPtSeg(bx, by, cx, cy, dx, dy),
+      distPtSeg(cx, cy, ax, ay, bx, by), distPtSeg(dx, dy, ax, ay, bx, by),
+    );
+  }
+
+  function pointInPoly(x, y, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 2; i < poly.length; j = i, i += 2) {
+      const xi = poly[i], yi = poly[i + 1], xj = poly[j], yj = poly[j + 1];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+
+  function imageCorners(n) {
+    const co = Math.cos(n.angle || 0), si = Math.sin(n.angle || 0);
+    const hw = n.w / 2, hh = n.h / 2;
+    const out = [];
+    for (const [u, v] of [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]) out.push(n.cx + u * co - v * si, n.cy + u * si + v * co);
+    return out;
+  }
+
+  // 레이어가 채우는 다각형들 (채우기 면, 이미지)
+  function areaPolys(n) {
+    if (n.kind === 'fill') return n.paths;
+    if (n.kind === 'image') return [imageCorners(n)];
+    if (n.kind === 'symmetry') return [n.region];
+    return null;
+  }
+
+  function pointInArea(x, y, polys) {
+    let inside = false;
+    for (const p of polys) if (pointInPoly(x, y, p)) inside = !inside;
+    return inside;
+  }
+
+  function leafBBox(n) {
+    let bb = bboxCache.get(n);
+    if (bb) return bb;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const scan = p => {
+      for (let i = 0; i < p.length; i += 2) {
+        if (p[i] < x0) x0 = p[i];
+        if (p[i] > x1) x1 = p[i];
+        if (p[i + 1] < y0) y0 = p[i + 1];
+        if (p[i + 1] > y1) y1 = p[i + 1];
+      }
+    };
+    const polys = areaPolys(n);
+    let h = 0;
+    if (polys) polys.forEach(scan);
+    else { scan(n.points); h = (n.size || 0) / 2 + 1; }
+    bb = [x0 - h, y0 - h, x1 + h, y1 + h];
+    bboxCache.set(n, bb);
+    return bb;
+  }
+
+  function nodeBBox(node) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const s of leavesOf(node)) {
+      const b = leafBBox(s);
+      x0 = Math.min(x0, b[0]); y0 = Math.min(y0, b[1]);
+      x1 = Math.max(x1, b[2]); y1 = Math.max(y1, b[3]);
+    }
+    return [x0, y0, x1, y1];
+  }
+
+  function nodesBBox(nodes) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const n of nodes) {
+      const b = nodeBBox(n);
+      x0 = Math.min(x0, b[0]); y0 = Math.min(y0, b[1]);
+      x1 = Math.max(x1, b[2]); y1 = Math.max(y1, b[3]);
+    }
+    return [x0, y0, x1, y1];
+  }
+
+  // 레이어가 선분 a-b 에서 tol 거리 안에 닿는가
+  function leafNearSegment(n, ax, ay, bx, by, tol) {
+    const bb = leafBBox(n);
+    if (Math.max(ax, bx) < bb[0] - tol || Math.min(ax, bx) > bb[2] + tol ||
+        Math.max(ay, by) < bb[1] - tol || Math.min(ay, by) > bb[3] + tol) return false;
+    const polys = areaPolys(n);
+    if (polys) {
+      if (pointInArea(ax, ay, polys) || pointInArea(bx, by, polys)) return true;
+      for (const p of polys) {
+        for (let i = 0, j = p.length - 2; i < p.length; j = i, i += 2) {
+          if (segSegDist(p[j], p[j + 1], p[i], p[i + 1], ax, ay, bx, by) <= tol) return true;
+        }
+      }
+      return false;
+    }
+    const p = n.points;
+    const t = tol + (n.size || 0) / 2;
+    if (p.length === 2) return distPtSeg(p[0], p[1], ax, ay, bx, by) <= t;
+    for (let i = 0; i < p.length - 2; i += 2) {
+      if (segSegDist(p[i], p[i + 1], p[i + 2], p[i + 3], ax, ay, bx, by) <= t) return true;
+    }
+    return false;
+  }
+
+  function leafInPoly(n, poly, pb) {
+    const bb = leafBBox(n);
+    if (bb[2] < pb[0] || bb[0] > pb[2] || bb[3] < pb[1] || bb[1] > pb[3]) return false;
+    const polys = areaPolys(n);
+    const lists = polys || [n.points];
+    for (const p of lists) {
+      for (let i = 0; i < p.length; i += 2) if (pointInPoly(p[i], p[i + 1], poly)) return true;
+    }
+    if (polys && pointInArea(poly[0], poly[1], polys)) return true;
+    for (const p of lists) {
+      const closed = !!polys;
+      for (let i = closed ? 0 : 2, j = closed ? p.length - 2 : 0; i < p.length; j = i, i += 2) {
+        for (let a = 0, b = poly.length - 2; a < poly.length; b = a, a += 2) {
+          if (segsIntersect(p[j], p[j + 1], p[i], p[i + 1], poly[b], poly[b + 1], poly[a], poly[a + 1])) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // 2D 행렬 [a, b, c, d, e, f] (canvas transform 과 같은 순서)
+  const Mat = {
+    identity: () => [1, 0, 0, 1, 0, 0],
+    translate: (tx, ty) => [1, 0, 0, 1, tx, ty],
+    rotateAbout(a, cx, cy) {
+      const co = Math.cos(a), si = Math.sin(a);
+      return [co, si, -si, co, cx - co * cx + si * cy, cy - si * cx - co * cy];
+    },
+    scaleAbout: (k, cx, cy) => [k, 0, 0, k, cx - k * cx, cy - k * cy],
+    // 점 (cx, cy) 를 지나고 각도 phi 인 직선에 대한 반사
+    reflectAbout(phi, cx, cy) {
+      const a = Math.cos(2 * phi), b = Math.sin(2 * phi);
+      return [a, b, b, -a, cx - a * cx - b * cy, cy - b * cx + a * cy];
+    },
+    invert(m) {
+      const det = m[0] * m[3] - m[1] * m[2] || 1e-12;
+      return [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det, (m[2] * m[5] - m[3] * m[4]) / det, (m[1] * m[4] - m[0] * m[5]) / det];
+    },
+    fromCtx: t => [t.a, t.b, t.c, t.d, t.e, t.f],
+    // 상자 [x0,y0,x1,y1] 를 변환한 뒤의 감싸는 상자
+    box(m, b) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const [x, y] of [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]]) {
+        const X = m[0] * x + m[2] * y + m[4], Y = m[1] * x + m[3] * y + m[5];
+        x0 = Math.min(x0, X); y0 = Math.min(y0, Y); x1 = Math.max(x1, X); y1 = Math.max(y1, Y);
+      }
+      return [x0, y0, x1, y1];
+    },
+    // A ∘ B (B 를 먼저 적용)
+    multiply: (A, B) => [
+      A[0] * B[0] + A[2] * B[1], A[1] * B[0] + A[3] * B[1],
+      A[0] * B[2] + A[2] * B[3], A[1] * B[2] + A[3] * B[3],
+      A[0] * B[4] + A[2] * B[5] + A[4], A[1] * B[4] + A[3] * B[5] + A[5],
+    ],
+    apply: (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]],
+  };
+
+  function transformPoints(p, m) {
+    const out = new Array(p.length);
+    for (let i = 0; i < p.length; i += 2) {
+      out[i] = round1(m[0] * p[i] + m[2] * p[i + 1] + m[4]);
+      out[i + 1] = round1(m[1] * p[i] + m[3] * p[i + 1] + m[5]);
+    }
+    return out;
+  }
+
+  // 각도 a 방향이 행렬 m 을 거친 뒤의 각도
+  function mapAngle(m, a) {
+    return Math.atan2(m[1] * Math.cos(a) + m[3] * Math.sin(a), m[0] * Math.cos(a) + m[2] * Math.sin(a));
+  }
+
+  function transformNode(n, m) {
+    const k = Math.hypot(m[0], m[1]);
+    const mirrored = m[0] * m[3] - m[1] * m[2] < 0; // 반전 포함
+    if (n.kind === 'group') {
+      n.children = n.children.map(c => transformNode(c, m));
+      return n;
+    }
+    if (n.kind === 'image') {
+      const [cx, cy] = Mat.apply(m, n.cx, n.cy);
+      let angle = mapAngle(m, n.angle || 0);
+      let flip = !!n.flip;
+      if (mirrored) { angle += Math.PI; flip = !flip; }
+      return { ...n, cx: round1(cx), cy: round1(cy), w: round1(n.w * k), h: round1(n.h * k), angle: round2(angle), flip };
+    }
+    if (n.kind === 'symmetry') {
+      const [cx, cy] = Mat.apply(m, n.cx, n.cy);
+      return {
+        ...n,
+        region: transformPoints(n.region, m),
+        cx: round1(cx),
+        cy: round1(cy),
+        angle: round2(mapAngle(m, n.angle || 0)),
+        v: n.v == null ? null : round1(n.v * k),
+        h: n.h == null ? null : round1(n.h * k * (mirrored ? -1 : 1)),
+      };
+    }
+    const s = { ...n };
+    if (n.points) s.points = transformPoints(n.points, m);
+    if (n.paths) s.paths = n.paths.map(p => transformPoints(p, m));
+    if (n.size != null) s.size = round2(n.size * k);
+    if (n.strength != null) s.strength = round2(n.strength * k);
+    if (n.erase) s.erase = n.erase.map(e => ({ size: round2(e.size * k), points: transformPoints(e.points, m) }));
+    if (n.pen === 'calligraphy') s.nib = round2(mapAngle(m, n.nib ?? NIB_ANGLE));
+    return s;
+  }
+
+  function withNewIds(n) {
+    n.id = uid();
+    if (n.kind === 'group') n.children.forEach(withNewIds);
+    return n;
+  }
+
+  // ================= 프로젝트 열기/저장 =================
+  function openProject(id) {
+    const data = storage.get(projectKey(id), null);
+    if (!data) { toast('프로젝트를 불러오지 못했어요'); renderHome(); return; }
+    project = migrate(data);
+    histories = new Map();
+    expanded = new Set();
+    showScreen('editor');
+    $('#project-name').textContent = project.name;
+    resize();
+    setBoard(project.boards[0]);
+    syncToolUI();
+  }
+
+  function closeProject() {
+    finishDrafts();
+    cancelActive();
+    closePopups();
+    saveProject();
+    project = null;
+    board = null;
+    showScreen('home');
+    renderHome();
+  }
+
+  let saveTimer = 0;
+  function markChanged() {
+    project.updatedAt = Date.now();
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveProject, 700);
+  }
+
+  function saveProject() {
+    clearTimeout(saveTimer);
+    saveTimer = 0;
+    if (!project) return;
+    const ok = storage.set(projectKey(project.id), project);
+    writeIndex(project, makeProjectThumb());
+    if (!ok) toast('저장 공간이 부족해 저장하지 못했어요 (밑그림 이미지가 크면 줄여 주세요)', 4000);
+  }
+
+  function writeIndex(p, thumb) {
+    const list = storage.get(INDEX_KEY, []);
+    const meta = { id: p.id, name: p.name, width: p.width, height: p.height, createdAt: p.createdAt, updatedAt: p.updatedAt, thumb };
+    const i = list.findIndex(m => m.id === p.id);
+    if (i >= 0) list[i] = meta; else list.push(meta);
+    storage.set(INDEX_KEY, list);
+  }
+
+  function makeProjectThumb() {
+    const main = project.boards[0];
+    const scale = 320 / Math.max(project.width, project.height);
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(project.width * scale));
+    c.height = Math.max(1, Math.round(project.height * scale));
+    const x = c.getContext('2d');
+    x.fillStyle = '#fff';
+    x.fillRect(0, 0, c.width, c.height);
+    x.scale(scale, scale);
+    drawNodes(x, main.layers, null, 'export');
+    try { return c.toDataURL('image/jpeg', 0.8); } catch { return null; }
+  }
+
+  window.addEventListener('pagehide', () => { if (project) saveProject(); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden && project) saveProject(); });
+
+  $('#btn-home').addEventListener('click', closeProject);
+  $('#project-name').addEventListener('click', () => {
+    const name = prompt('프로젝트 이름', project.name);
+    if (name == null) return;
+    project.name = name.trim() || project.name;
+    $('#project-name').textContent = project.name;
+    markChanged();
+  });
+
+  // ================= 캔버스(보드) =================
+  function setBoard(b) {
+    if (board) finishDrafts();
+    cancelActive();
+    closePopups();
+    board = b;
+    selection = new Set();
+    selBox = null;
+    symEditId = null;
+    if (!board.view) board.view = defaultView(board);
+    cacheDirty = true;
+    renderTabs();
+    renderLayers();
+    updateHistoryButtons();
+    updateSelectionUI();
+    updateZoomLabel();
+    updateAutoGroupUI();
+    if (tool.current === 'underlay' || tool.current === 'symmetry') buildContextBar();
+    $('#board-badge').textContent = board.type === 'main'
+      ? `기본 캔버스 · ${project.width} × ${project.height}`
+      : '보조 캔버스 · 무한';
+    requestRender();
+  }
+
+  function defaultView(b) {
+    if (b.type === 'main') {
+      const m = Math.min(56, Math.min(cw, ch) * 0.08);
+      const s = clamp(Math.min((cw - m * 2) / project.width, (ch - m * 2) / project.height), MIN_ZOOM, MAX_ZOOM);
+      return { x: (cw - project.width * s) / 2, y: (ch - project.height * s) / 2, s };
+    }
+    return { x: cw / 2, y: ch / 2, s: 1 };
+  }
+
+  function addAuxBoard() {
+    project.auxCounter = (project.auxCounter || 0) + 1;
+    const b = newBoard(uid(), 'aux', '보조 캔버스 ' + project.auxCounter);
+    project.boards.push(b);
+    markChanged();
+    setBoard(b);
+  }
+
+  function removeAuxBoard(b) {
+    if ((b.layers.length || b.underlays.length) && !confirm(`'${b.name}'을(를) 삭제할까요? 그린 것도 함께 사라져요.`)) return;
+    project.boards = project.boards.filter(x => x !== b);
+    histories.delete(b.id);
+    markChanged();
+    if (board === b) setBoard(project.boards[0]);
+    else renderTabs();
+  }
+
+  function renderTabs() {
+    const tabs = $('#tabs');
+    tabs.innerHTML = '';
+    for (const b of project.boards) {
+      const t = document.createElement('button');
+      t.type = 'button';
+      t.className = 'tab ' + b.type + (b === board ? ' active' : '');
+      const kind = document.createElement('span');
+      kind.className = 'tab-kind';
+      const label = document.createElement('span');
+      label.textContent = b.name;
+      t.append(kind, label);
+      if (b.type === 'aux') {
+        const close = document.createElement('span');
+        close.className = 'tab-close';
+        close.title = '보조 캔버스 삭제';
+        close.innerHTML = ICONS.x;
+        close.addEventListener('click', e => { e.stopPropagation(); removeAuxBoard(b); });
+        t.appendChild(close);
+      }
+      t.addEventListener('click', () => { if (b !== board) setBoard(b); });
+      tabs.appendChild(t);
+    }
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'tab tab-add';
+    add.innerHTML = ICONS.plus + '<span>보조 캔버스</span>';
+    add.addEventListener('click', addAuxBoard);
+    tabs.appendChild(add);
+    tabs.querySelector('.tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  // ================= 레이어 그리기 =================
+  const patternCache = new Map();
+  const imageCache = new Map();
+
+  function getImage(src) {
+    let img = imageCache.get(src);
+    if (!img) {
+      img = new Image();
+      img.onload = () => { invalidate(); renderLayers(); };
+      img.src = src;
+      imageCache.set(src, img);
+    }
+    return img.complete && img.naturalWidth ? img : null;
+  }
+
+  // 연필 질감: 색마다 한 번 만든 노이즈 무늬
+  function pencilTexture(color) {
+    let c = patternCache.get(color);
+    if (c) return c;
+    c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const x = c.getContext('2d');
+    const img = x.createImageData(64, 64);
+    const hex = color.replace('#', '');
+    const r = parseInt(hex.slice(0, 2), 16), g = parseInt(hex.slice(2, 4), 16), b = parseInt(hex.slice(4, 6), 16);
+    let seed = 1234567;
+    const rand = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    for (let i = 0; i < img.data.length; i += 4) {
+      img.data[i] = r; img.data[i + 1] = g; img.data[i + 2] = b;
+      img.data[i + 3] = rand() < 0.62 ? 150 + rand() * 105 : rand() * 50;
+    }
+    x.putImageData(img, 0, 0);
+    patternCache.set(color, c);
+    return c;
+  }
+
+  // 중점을 잇는 2차 곡선으로 부드러운 경로
+  function tracePath(c, p) {
+    const n = p.length / 2;
+    c.moveTo(p[0], p[1]);
+    if (n === 1) { c.lineTo(p[0] + 0.01, p[1]); return; }
+    if (n === 2) { c.lineTo(p[2], p[3]); return; }
+    for (let i = 1; i < n - 1; i++) {
+      const x = p[i * 2], y = p[i * 2 + 1];
+      c.quadraticCurveTo(x, y, (x + p[i * 2 + 2]) / 2, (y + p[i * 2 + 3]) / 2);
+    }
+    c.lineTo(p[p.length - 2], p[p.length - 1]);
+  }
+
+  function tracePolys(c, polys) {
+    for (const p of polys) {
+      c.moveTo(p[0], p[1]);
+      for (let i = 2; i < p.length; i += 2) c.lineTo(p[i], p[i + 1]);
+      c.closePath();
+    }
+  }
+
+  // 투명도/합성 없이 모양만 그림
+  function drawRaw(c, n) {
+    if (n.kind === 'fill') {
+      c.fillStyle = n.color;
+      c.beginPath();
+      tracePolys(c, n.paths);
+      c.fill('evenodd');
+      return;
+    }
+    if (n.kind === 'image') {
+      const img = getImage(n.src);
+      if (!img) return;
+      c.save();
+      c.translate(n.cx, n.cy);
+      c.rotate(n.angle || 0);
+      if (n.flip) c.scale(-1, 1);
+      c.drawImage(img, -n.w / 2, -n.h / 2, n.w, n.h);
+      c.restore();
+      return;
+    }
+    const pen = n.pen || 'basic';
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    if (pen === 'brush' && n.w) return drawVariable(c, n);
+    if (pen === 'calligraphy') return drawCalligraphy(c, n);
+    c.strokeStyle = pen === 'pencil' ? c.createPattern(pencilTexture(n.color), 'repeat') : n.color;
+    if (pen === 'highlighter') c.lineCap = 'square';
+    c.lineWidth = n.size;
+    c.beginPath();
+    tracePath(c, n.points);
+    c.stroke();
+  }
+
+  // 붓펜: 점마다 굵기가 다름
+  function drawVariable(c, s) {
+    const p = s.points, w = s.w, n = p.length / 2;
+    c.strokeStyle = s.color;
+    c.fillStyle = s.color;
+    if (n === 1) {
+      c.beginPath();
+      c.arc(p[0], p[1], s.size * w[0] / 2, 0, Math.PI * 2);
+      c.fill();
+      return;
+    }
+    let px = p[0], py = p[1];
+    for (let i = 1; i < n; i++) {
+      const x = p[i * 2], y = p[i * 2 + 1];
+      c.beginPath();
+      c.moveTo(px, py);
+      if (i < n - 1) {
+        const ex = (x + p[i * 2 + 2]) / 2, ey = (y + p[i * 2 + 3]) / 2;
+        c.quadraticCurveTo(x, y, ex, ey);
+        px = ex; py = ey;
+      } else {
+        c.lineTo(x, y);
+      }
+      c.lineWidth = Math.max(0.3, s.size * ((w[i - 1] ?? 1) + (w[i] ?? 1)) / 2);
+      c.stroke();
+    }
+  }
+
+  // 캘리그라피: 납작한 펜촉이 지나간 자리를 채움 (방향에 따라 굵기가 달라짐)
+  function drawCalligraphy(c, s) {
+    const p = s.points, n = p.length / 2;
+    const a = s.nib ?? NIB_ANGLE;
+    const hx = Math.cos(a) * s.size / 2, hy = Math.sin(a) * s.size / 2;
+    c.fillStyle = s.color;
+    c.strokeStyle = s.color;
+    c.lineWidth = Math.max(0.5, s.size * 0.07);
+    c.beginPath();
+    tracePath(c, p);
+    c.stroke();
+    c.beginPath();
+    if (n === 1) {
+      c.moveTo(p[0] - hx, p[1] - hy);
+      c.lineTo(p[0] + hx, p[1] + hy);
+      c.stroke();
+      return;
+    }
+    for (let i = 0; i < n - 1; i++) {
+      const x0 = p[i * 2], y0 = p[i * 2 + 1], x1 = p[i * 2 + 2], y1 = p[i * 2 + 3];
+      // 모든 사각형이 같은 방향으로 감기도록 해서 nonzero 채우기에서 구멍이 안 생기게 함
+      const cross = (x1 - x0) * hy - (y1 - y0) * hx;
+      if (cross >= 0) {
+        c.moveTo(x0 - hx, y0 - hy); c.lineTo(x0 + hx, y0 + hy); c.lineTo(x1 + hx, y1 + hy); c.lineTo(x1 - hx, y1 - hy);
+      } else {
+        c.moveTo(x0 - hx, y0 - hy); c.lineTo(x1 - hx, y1 - hy); c.lineTo(x1 + hx, y1 + hy); c.lineTo(x0 + hx, y0 + hy);
+      }
+      c.closePath();
+    }
+    c.fill('nonzero');
+  }
+
+  // 투명도, 합성, 영역 지우개 구멍까지 적용해서 그림
+  // raw: 펜의 투명도/합성 없이 (반전 사본을 따로 그린 뒤 한 번에 적용할 때)
+  function drawVisible(c, n, extraErase, raw) {
+    const def = !raw && n.kind === 'stroke' ? (PEN[n.pen] || PEN.basic) : {};
+    const erases = extraErase ? [...(n.erase || []), extraErase] : n.erase;
+    if (erases && erases.length) { drawErased(c, n, def, erases); return; }
+    c.save();
+    if (def.alpha) c.globalAlpha *= def.alpha;
+    if (def.blend) c.globalCompositeOperation = def.blend;
+    drawRaw(c, n);
+    c.restore();
+  }
+
+  // 지운 부분은 흰색으로 덮는 게 아니라 진짜로 투명하게 뚫음 (destination-out)
+  function drawErased(c, n, def, erases) {
+    const t = c.getTransform();
+    const b = leafBBox(n);
+    let dx0 = Infinity, dy0 = Infinity, dx1 = -Infinity, dy1 = -Infinity;
+    for (const [x, y] of [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]]) {
+      const X = t.a * x + t.c * y + t.e, Y = t.b * x + t.d * y + t.f;
+      dx0 = Math.min(dx0, X); dy0 = Math.min(dy0, Y); dx1 = Math.max(dx1, X); dy1 = Math.max(dy1, Y);
+    }
+    const rx = Math.max(0, Math.floor(dx0)), ry = Math.max(0, Math.floor(dy0));
+    const rw = Math.min(c.canvas.width, Math.ceil(dx1)) - rx;
+    const rh = Math.min(c.canvas.height, Math.ceil(dy1)) - ry;
+    if (rw <= 0 || rh <= 0) return;
+    if (scratch.width < rw || scratch.height < rh) {
+      scratch.width = Math.max(scratch.width, rw);
+      scratch.height = Math.max(scratch.height, rh);
+    }
+    sctx.setTransform(1, 0, 0, 1, 0, 0);
+    sctx.globalAlpha = 1;
+    sctx.globalCompositeOperation = 'source-over';
+    sctx.clearRect(0, 0, rw, rh);
+    sctx.setTransform(t.a, t.b, t.c, t.d, t.e - rx, t.f - ry);
+    drawRaw(sctx, n);
+    sctx.globalCompositeOperation = 'destination-out';
+    sctx.strokeStyle = '#000';
+    sctx.lineCap = 'round';
+    sctx.lineJoin = 'round';
+    for (const e of erases) {
+      sctx.lineWidth = e.size;
+      sctx.beginPath();
+      tracePath(sctx, e.points);
+      sctx.stroke();
+    }
+    sctx.globalCompositeOperation = 'source-over';
+    c.save();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    if (def.alpha) c.globalAlpha *= def.alpha;
+    if (def.blend) c.globalCompositeOperation = def.blend;
+    c.drawImage(scratch, 0, 0, rw, rh, rx, ry, rw, rh);
+    c.restore();
+  }
+
+  // 가상 선: 작업 화면에서만 점선으로 보이고 저장 이미지엔 안 나옴
+  function drawGuide(c, n, mode) {
+    if (mode === 'export') return;
+    const t = c.getTransform();
+    const sc = Math.hypot(t.a, t.b) || 1;
+    c.save();
+    c.strokeStyle = GUIDE_COLOR;
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    if (mode === 'thumb') {
+      c.lineWidth = 2 / sc;
+    } else {
+      c.lineWidth = 1.6 * dpr / sc;
+      c.setLineDash([7 * dpr / sc, 5 * dpr / sc]);
+    }
+    c.beginPath();
+    tracePath(c, n.points);
+    c.stroke();
+    c.restore();
+  }
+
+  // ----- 흐림 -----
+  const blurA = document.createElement('canvas');
+  const blurB = document.createElement('canvas');
+  const blurM = document.createElement('canvas');
+  const canFilter = (() => {
+    try {
+      const x = document.createElement('canvas').getContext('2d');
+      if (typeof x.filter !== 'string') return false;
+      x.filter = 'blur(2px)';
+      return x.filter === 'blur(2px)';
+    } catch { return false; }
+  })();
+
+  // 흐림 레이어: 그 아래에 이미 그려진 것을 칠한 영역만큼 흐리게
+  function applyBlur(c, n) {
+    const t = c.getTransform();
+    const sc = Math.hypot(t.a, t.b) || 1;
+    const sigma = n.strength * sc;
+    if (sigma < 0.3 || !n.points.length) return;
+    const b = leafBBox(n);
+    const m = n.strength * 3;
+    let dx0 = Infinity, dy0 = Infinity, dx1 = -Infinity, dy1 = -Infinity;
+    for (const [x, y] of [[b[0] - m, b[1] - m], [b[2] + m, b[1] - m], [b[0] - m, b[3] + m], [b[2] + m, b[3] + m]]) {
+      const X = t.a * x + t.c * y + t.e, Y = t.b * x + t.d * y + t.f;
+      dx0 = Math.min(dx0, X); dy0 = Math.min(dy0, Y); dx1 = Math.max(dx1, X); dy1 = Math.max(dy1, Y);
+    }
+    const rx = Math.max(0, Math.floor(dx0)), ry = Math.max(0, Math.floor(dy0));
+    const rw = Math.min(c.canvas.width, Math.ceil(dx1)) - rx;
+    const rh = Math.min(c.canvas.height, Math.ceil(dy1)) - ry;
+    if (rw <= 0 || rh <= 0 || rw * rh > 16e6) return;
+
+    for (const cv of [blurA, blurB, blurM]) { cv.width = rw; cv.height = rh; }
+    const a = blurA.getContext('2d'), bx = blurB.getContext('2d'), mx = blurM.getContext('2d');
+    a.drawImage(c.canvas, rx, ry, rw, rh, 0, 0, rw, rh);
+    if (canFilter) {
+      bx.filter = `blur(${sigma}px)`;
+      bx.drawImage(blurA, 0, 0);
+      bx.filter = 'none';
+    } else {
+      bx.putImageData(window.Raster.blurImageData(a.getImageData(0, 0, rw, rh), sigma), 0, 0);
+    }
+    // 칠한 영역 마스크 (가장자리를 살짝 부드럽게)
+    mx.setTransform(t.a, t.b, t.c, t.d, t.e - rx, t.f - ry);
+    mx.strokeStyle = '#000';
+    mx.lineCap = 'round';
+    mx.lineJoin = 'round';
+    mx.lineWidth = n.size;
+    mx.beginPath();
+    tracePath(mx, n.points);
+    mx.stroke();
+    bx.globalCompositeOperation = 'destination-in';
+    bx.drawImage(blurM, 0, 0);
+    // 원본 × (1 - 마스크) + 흐린 것 × 마스크 (가장자리에 이음매가 안 생기게 더하기로 합성)
+    a.globalCompositeOperation = 'destination-out';
+    a.drawImage(blurM, 0, 0);
+    a.globalCompositeOperation = 'lighter';
+    a.drawImage(blurB, 0, 0);
+    a.globalCompositeOperation = 'source-over';
+
+    c.save();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.clearRect(rx, ry, rw, rh);
+    c.globalAlpha = 1;
+    c.globalCompositeOperation = 'source-over';
+    c.drawImage(blurA, 0, 0, rw, rh, rx, ry, rw, rh);
+    c.restore();
+  }
+
+  function drawBlurMask(c, n) {
+    c.save();
+    c.strokeStyle = 'rgba(80, 140, 255, .45)';
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    c.lineWidth = n.size;
+    c.beginPath();
+    tracePath(c, n.points);
+    c.stroke();
+    c.restore();
+  }
+
+  // ----- 자동 대칭 -----
+  // 대칭 레이어보다 위(나중)에 그려지는 레이어 중 대칭 영역 안의 부분이 축을 기준으로 반전돼서 함께 그려진다
+  function symAxes(n) {
+    const a = n.angle || 0, co = Math.cos(a), si = Math.sin(a);
+    const out = [];
+    // 세로 축: 가로로 움직임 / 가로 축: 세로로 움직임
+    if (n.v != null) out.push({ which: 'v', x: n.cx + n.v * co, y: n.cy + n.v * si, dir: a + Math.PI / 2 });
+    if (n.h != null) out.push({ which: 'h', x: n.cx - n.h * si, y: n.cy + n.h * co, dir: a });
+    return out;
+  }
+
+  function symMatrices(n) {
+    const ms = symAxes(n).map(ax => Mat.reflectAbout(ax.dir, ax.x, ax.y));
+    if (ms.length === 2) ms.push(Mat.multiply(ms[0], ms[1]));
+    return ms;
+  }
+
+  function drawSymmetry(c, n, mode) {
+    if (mode === 'export' || mode === 'walls') return;
+    const t = c.getTransform();
+    const sc = Math.hypot(t.a, t.b) || 1;
+    const px = (mode === 'editor' ? dpr : 1) / sc;
+    const b = leafBBox(n);
+    const len = Math.hypot(b[2] - b[0], b[3] - b[1]) + 10;
+    c.save();
+    c.beginPath();
+    tracePolys(c, [n.region]);
+    c.fillStyle = 'rgba(142, 78, 198, .05)';
+    c.fill();
+    c.strokeStyle = SYM_COLOR;
+    c.lineWidth = 1.4 * px;
+    c.setLineDash([6 * px, 4 * px]);
+    c.stroke();
+    c.setLineDash([]);
+    c.clip();
+    c.lineWidth = 2 * px;
+    for (const ax of symAxes(n)) {
+      const dx = Math.cos(ax.dir) * len, dy = Math.sin(ax.dir) * len;
+      c.beginPath();
+      c.moveTo(ax.x - dx, ax.y - dy);
+      c.lineTo(ax.x + dx, ax.y + dy);
+      c.stroke();
+    }
+    c.restore();
+  }
+
+  // 반전된 사본 그리기
+  // 브라우저마다 다르게 동작할 수 있는 clip() 대신, 별도 캔버스에 그린 뒤
+  // 대칭 구역 모양으로 잘라(destination-in) 붙인다 (영역 지우개·흐림과 같은 방식)
+  const mirrorCanvas = document.createElement('canvas');
+  const mirrorCtx = mirrorCanvas.getContext('2d');
+
+  function fillPoly(c, m, poly) {
+    c.setTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
+    c.beginPath();
+    tracePolys(c, [poly]);
+    c.fill();
+  }
+
+  function drawMirrors(c, n, extraErase, mode, sc) {
+    const base = sc.base;
+    const T = Mat.fromCtx(c.getTransform());
+    const M = Mat.multiply(Mat.invert(base), T); // 레이어가 끌려 움직이는 중이면 그 변환 (월드 기준)
+    const wb = Mat.box(M, leafBBox(n));
+    const W = c.canvas.width, H = c.canvas.height;
+    const def = mode !== 'walls' && n.kind === 'stroke' ? (PEN[n.pen] || PEN.basic) : {};
+    for (const sym of sc.syms) {
+      const rb = leafBBox(sym);
+      if (wb[2] < rb[0] || wb[0] > rb[2] || wb[3] < rb[1] || wb[1] > rb[3]) continue;
+      const regDev = Mat.box(base, rb);
+      for (const R of symMatrices(sym)) {
+        // 그릴 범위: (반전된 레이어) ∩ (대칭 구역) ∩ (캔버스), 화면 픽셀 기준
+        const leafDev = Mat.box(Mat.multiply(base, R), wb);
+        const rx = Math.max(0, Math.floor(Math.max(regDev[0], leafDev[0])));
+        const ry = Math.max(0, Math.floor(Math.max(regDev[1], leafDev[1])));
+        const rw = Math.min(W, Math.ceil(Math.min(regDev[2], leafDev[2]))) - rx;
+        const rh = Math.min(H, Math.ceil(Math.min(regDev[3], leafDev[3]))) - ry;
+        if (rw <= 0 || rh <= 0) continue;
+        if (mirrorCanvas.width < rw || mirrorCanvas.height < rh) {
+          mirrorCanvas.width = Math.max(mirrorCanvas.width, rw);
+          mirrorCanvas.height = Math.max(mirrorCanvas.height, rh);
+        }
+        const x = mirrorCtx;
+        x.setTransform(1, 0, 0, 1, 0, 0);
+        x.globalAlpha = 1;
+        x.globalCompositeOperation = 'source-over';
+        x.clearRect(0, 0, rw, rh);
+        const off = m => [m[0], m[1], m[2], m[3], m[4] - rx, m[5] - ry];
+        // 1) 반전해서 그리기
+        const D = off(Mat.multiply(base, Mat.multiply(R, M)));
+        x.setTransform(D[0], D[1], D[2], D[3], D[4], D[5]);
+        drawLeaf(x, n, extraErase, mode, true);
+        // 2) 원본 중 대칭 구역 안에 있던 부분만 남김 (= 구역을 반전한 모양으로 자름)
+        x.globalCompositeOperation = 'destination-in';
+        x.fillStyle = '#000';
+        fillPoly(x, off(base), transformPoints(sym.region, R));
+        // 3) 반전된 결과도 대칭 구역 안까지만
+        fillPoly(x, off(base), sym.region);
+        x.globalCompositeOperation = 'source-over';
+        // 4) 붙이기
+        c.save();
+        c.setTransform(1, 0, 0, 1, 0, 0);
+        if (def.alpha) c.globalAlpha *= def.alpha;
+        if (def.blend) c.globalCompositeOperation = def.blend;
+        c.drawImage(mirrorCanvas, 0, 0, rw, rh, rx, ry, rw, rh);
+        c.restore();
+      }
+    }
+  }
+
+  const MIRRORABLE = new Set(['stroke', 'fill', 'image', 'guide']);
+
+  // 지금 보이는 대칭 레이어들 (그리는 중인 새 레이어는 맨 위에 올라가므로 전부 적용)
+  function collectSyms() {
+    const out = [];
+    const walk = list => {
+      for (const n of list) {
+        if (!n.visible) continue;
+        if (n.kind === 'group') walk(n.children);
+        else if (n.kind === 'symmetry') out.push(n);
+      }
+    };
+    walk(board.layers);
+    return out;
+  }
+
+  // 그리는 중인 레이어 미리보기 (대칭 사본 포함)
+  function drawPreview(c, node) {
+    // 그리는 중에는 점이 계속 늘어나므로 영역 상자를 매번 새로 계산
+    bboxCache.delete(node);
+    applyView(c);
+    drawLeaf(c, node, null, 'editor');
+    if (!MIRRORABLE.has(node.kind)) return;
+    const syms = collectSyms();
+    if (syms.length) drawMirrors(c, node, null, 'editor', { syms, base: Mat.fromCtx(c.getTransform()) });
+  }
+
+  // mode: 'editor' 작업 화면 / 'export' 저장 이미지 / 'thumb' 레이어 미리보기 / 'walls' 채우기 경계
+  function drawLeaf(c, n, extraErase, mode, raw) {
+    if (mode === 'walls') {
+      if (n.kind === 'guide') {
+        const t = c.getTransform();
+        c.save();
+        c.strokeStyle = '#000';
+        c.lineWidth = 1.8 / (Math.hypot(t.a, t.b) || 1);
+        c.lineCap = 'round';
+        c.lineJoin = 'round';
+        c.beginPath();
+        tracePath(c, n.points);
+        c.stroke();
+        c.restore();
+      } else if (n.kind === 'stroke') {
+        // 반투명 펜도 빈틈 없는 벽으로
+        drawVisible(c, ['pencil', 'marker', 'highlighter'].includes(n.pen) ? { ...n, pen: 'basic' } : n, extraErase);
+      }
+      return;
+    }
+    if (n.kind === 'guide') drawGuide(c, n, mode);
+    else if (n.kind === 'symmetry') drawSymmetry(c, n, mode);
+    else if (n.kind === 'blur') { if (mode === 'thumb') drawBlurMask(c, n); else applyBlur(c, n); }
+    else drawVisible(c, n, extraErase, raw);
+  }
+
+  // 레이어 트리 그리기 (뒤 → 앞)
+  function drawNodes(c, nodes, lv, mode, sc) {
+    if (!sc) sc = { syms: [], base: Mat.fromCtx(c.getTransform()) };
+    for (const n of nodes) {
+      if (!n.visible) continue;
+      if (lv && lv.hidden.has(n.id)) continue;
+      const m = lv && lv.transform && lv.transform.ids.has(n.id) ? lv.transform.m : null;
+      if (m) { c.save(); c.transform(...m); }
+      if (n.kind === 'group') {
+        drawNodes(c, n.children, lv, mode, sc);
+      } else {
+        const er = lv && lv.erase && lv.erase.strokes.has(n.id) ? lv.erase.path : null;
+        drawLeaf(c, n, er, mode);
+        if (n.kind === 'symmetry') sc.syms.push(m ? transformNode({ ...n }, m) : n);
+        else if (sc.syms.length && MIRRORABLE.has(n.kind)) drawMirrors(c, n, er, mode, sc);
+      }
+      if (m) c.restore();
+    }
+  }
+
+  // ================= 화면 렌더링 =================
+  function resize() {
+    const r = stage.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    const prevW = cw, prevH = ch;
+    dpr = Math.min(window.devicePixelRatio || 1, 3);
+    cw = r.width;
+    ch = r.height;
+    for (const c of [canvas, cache, ucanvas]) {
+      c.width = Math.round(cw * dpr);
+      c.height = Math.round(ch * dpr);
+    }
+    if (project && prevW && prevH) {
+      for (const b of project.boards) {
+        if (!b.view) continue;
+        b.view.x += (cw - prevW) / 2;
+        b.view.y += (ch - prevH) / 2;
+      }
+    }
+    cacheDirty = true;
+    requestRender();
+  }
+
+  new ResizeObserver(() => { if (project) resize(); }).observe(stage);
+
+  function requestRender() {
+    if (!rafId) rafId = requestAnimationFrame(render);
+  }
+
+  function invalidate() {
+    cacheDirty = true;
+    requestRender();
+  }
+
+  function applyView(c) {
+    const v = board.view;
+    c.setTransform(dpr * v.s, 0, 0, dpr * v.s, dpr * v.x, dpr * v.y);
+  }
+
+  function render() {
+    rafId = 0;
+    if (!project || !board) return;
+    if (cacheDirty) {
+      drawScene(cctx);
+      cacheDirty = false;
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(cache, 0, 0);
+    drawOverlay(ctx);
+  }
+
+  function drawScene(c) {
+    const v = board.view;
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalAlpha = 1;
+    c.globalCompositeOperation = 'source-over';
+
+    if (board.type === 'main') {
+      c.fillStyle = PAGE_BG;
+      c.fillRect(0, 0, cache.width, cache.height);
+      applyView(c);
+      c.save();
+      c.shadowColor = 'rgba(20, 20, 40, .18)';
+      c.shadowBlur = 18 * dpr;
+      c.shadowOffsetY = 3 * dpr;
+      c.fillStyle = '#fff';
+      c.fillRect(0, 0, project.width, project.height);
+      c.restore();
+    } else {
+      c.fillStyle = AUX_BG;
+      c.fillRect(0, 0, cache.width, cache.height);
+      drawDotGrid(c);
+      applyView(c);
+    }
+
+    // 밑그림: 따로 그린 뒤 투명도를 한 번에 적용 (겹친 부분이 진해지지 않게)
+    if (board.underlays.some(n => n.visible)) {
+      uctx.setTransform(1, 0, 0, 1, 0, 0);
+      uctx.clearRect(0, 0, ucanvas.width, ucanvas.height);
+      applyView(uctx);
+      drawNodes(uctx, board.underlays, live, 'editor');
+      c.save();
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.globalAlpha = board.underlayOpacity;
+      c.drawImage(ucanvas, 0, 0);
+      c.restore();
+    }
+
+    drawNodes(c, board.layers, live, 'editor');
+    if (active && active.kind === 'blurpaint') applyBlur(c, active.node);
+
+    if (board.type === 'main') {
+      c.strokeStyle = 'rgba(20, 20, 40, .22)';
+      c.lineWidth = 1 / v.s;
+      c.strokeRect(0, 0, project.width, project.height);
+    }
+  }
+
+  function drawDotGrid(c) {
+    const v = board.view;
+    let step = 32;
+    while (step * v.s < 14) step *= 2;
+    while (step * v.s > 56) step /= 2;
+    const sx = step * v.s;
+    const ox = ((v.x % sx) + sx) % sx;
+    const oy = ((v.y % sx) + sx) % sx;
+    const r = Math.max(1, 1.2 * dpr);
+    c.fillStyle = 'rgba(40, 40, 60, .18)';
+    for (let y = oy; y < ch; y += sx) {
+      for (let x = ox; x < cw; x += sx) {
+        c.fillRect(x * dpr - r / 2, y * dpr - r / 2, r, r);
+      }
+    }
+    const px = v.x * dpr, py = v.y * dpr;
+    c.strokeStyle = 'rgba(79, 91, 213, .35)';
+    c.lineWidth = Math.max(1, dpr);
+    c.beginPath();
+    c.moveTo(px - 8 * dpr, py); c.lineTo(px + 8 * dpr, py);
+    c.moveTo(px, py - 8 * dpr); c.lineTo(px, py + 8 * dpr);
+    c.stroke();
+  }
+
+  function screenDot(c, x, y, r, fill) {
+    c.beginPath();
+    c.arc(x, y, r, 0, Math.PI * 2);
+    c.fillStyle = fill;
+    c.fill();
+    c.stroke();
+  }
+
+  function drawOverlay(c) {
+    const v = board.view;
+
+    // 그리는 중인 레이어 미리보기
+    if (active && active.preview) drawPreview(c, active.preview);
+
+    // 다각형 만드는 중
+    if (polyDraft && polyDraft.pts.length) {
+      const pts = polyDraft.pts;
+      const hv = hover && !(active && active.kind === 'polypt') ? toWorld(...hover) : null;
+      const node = draftPolygonNode(hv);
+      if (node) drawPreview(c, node);
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.save();
+      c.strokeStyle = ACCENT;
+      c.lineWidth = 1.5;
+      pts.forEach((p, i) => {
+        const [x, y] = toScreen(p.x, p.y);
+        screenDot(c, x, y, i === 0 && pts.length >= 3 ? 7 : 4.5, i === 0 ? ACCENT : '#fff');
+      });
+      c.restore();
+    }
+
+    // 베지에 곡선 만드는 중
+    if (curveDraft && curveDraft.anchors.length) {
+      const A = curveDraft.anchors;
+      const hv = hover && !active ? toWorld(...hover) : null;
+      const node = draftCurveNode(false, hv);
+      if (node) drawPreview(c, node);
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.save();
+      c.strokeStyle = ACCENT;
+      c.lineWidth = 1.2;
+      A.forEach((a, i) => {
+        const [x, y] = toScreen(a.x, a.y);
+        if (a.hx || a.hy) {
+          const [ox, oy] = toScreen(a.x + a.hx, a.y + a.hy);
+          const [ix, iy] = toScreen(a.x - a.hx, a.y - a.hy);
+          c.beginPath();
+          c.moveTo(ix, iy);
+          c.lineTo(ox, oy);
+          c.stroke();
+          screenDot(c, ox, oy, 3.5, '#fff');
+          screenDot(c, ix, iy, 3.5, '#fff');
+        }
+        c.save();
+        c.fillStyle = i === 0 ? ACCENT : '#fff';
+        c.beginPath();
+        c.rect(x - 5, y - 5, 10, 10);
+        c.fill();
+        c.stroke();
+        c.restore();
+      });
+      c.restore();
+    }
+
+    // 자동 대칭: 고른 대칭의 축 손잡이
+    const sym = tool.current === 'symmetry' ? currentSym() : null;
+    if (sym) {
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.save();
+      c.strokeStyle = '#fff';
+      c.lineWidth = 2;
+      for (const ax of symAxes(sym)) {
+        const [x, y] = toScreen(ax.x, ax.y);
+        c.beginPath();
+        c.arc(x, y, 9, 0, Math.PI * 2);
+        c.fillStyle = SYM_COLOR;
+        c.fill();
+        c.stroke();
+        // 움직일 수 있는 방향 표시
+        const d = ax.dir + Math.PI / 2, ux = Math.cos(d) * 4, uy = Math.sin(d) * 4;
+        c.beginPath();
+        c.moveTo(x - ux, y - uy);
+        c.lineTo(x + ux, y + uy);
+        c.stroke();
+      }
+      const pts = [];
+      for (let i = 0; i < sym.region.length; i += 2) pts.push(toScreen(sym.region[i], sym.region[i + 1]));
+      c.strokeStyle = SYM_COLOR;
+      c.lineWidth = 2;
+      c.beginPath();
+      pts.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y)));
+      c.closePath();
+      c.stroke();
+      c.restore();
+    }
+
+    // 올가미 / 사각형 선택 영역
+    if (active && active.kind === 'lasso') {
+      applyView(c);
+      c.save();
+      c.lineWidth = 1.5 / v.s;
+      c.setLineDash([6 / v.s, 5 / v.s]);
+      c.strokeStyle = ACCENT;
+      c.fillStyle = 'rgba(79, 91, 213, .08)';
+      c.beginPath();
+      const p = lassoPolygon(active);
+      c.moveTo(p[0], p[1]);
+      for (let i = 2; i < p.length; i += 2) c.lineTo(p[i], p[i + 1]);
+      c.closePath();
+      c.fill();
+      c.stroke();
+      c.restore();
+    }
+
+    // 선택 상자
+    if (selBox && selection.size) {
+      const box = boxScreen();
+      const handles = handlesActive();
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.save();
+      c.strokeStyle = ACCENT;
+      c.lineWidth = 1.5;
+      c.setLineDash([6, 4]);
+      c.beginPath();
+      box.pts.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y)));
+      c.closePath();
+      c.stroke();
+      c.setLineDash([]);
+      if (handles) {
+        const [tx, ty] = box.topMid, [rx, ry] = box.rot;
+        c.beginPath();
+        c.moveTo(tx, ty);
+        c.lineTo(rx, ry);
+        c.stroke();
+        screenDot(c, rx, ry, 8, '#fff');
+        screenDot(c, box.pts[2][0], box.pts[2][1], 7, '#fff');
+        c.beginPath();
+        c.arc(rx, ry, 3.5, -Math.PI * 0.9, Math.PI * 0.4);
+        c.stroke();
+      }
+      c.restore();
+    }
+
+    // 지우개 / 흐림 붓 커서
+    const cursor = active && active.cursor ? active.cursor : hover;
+    const cursorR = brushCursorRadius();
+    if (cursor && cursorR) {
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.save();
+      c.beginPath();
+      c.arc(cursor[0], cursor[1], cursorR, 0, Math.PI * 2);
+      c.lineWidth = 1.5;
+      c.strokeStyle = 'rgba(255,255,255,.9)';
+      c.stroke();
+      c.lineWidth = 1;
+      c.strokeStyle = 'rgba(20,20,40,.7)';
+      c.stroke();
+      c.restore();
+    }
+  }
+
+  function brushCursorRadius() {
+    const s = board.view.s;
+    if (tool.current === 'eraser') return tool.eraserMode === 'layer' ? LAYER_ERASER_PX : Math.max(2, tool.eraserSize / 2 * s);
+    if (tool.current === 'blur') return Math.max(2, tool.blurSize / 2 * s);
+    return 0;
+  }
+
+  // ================= 화면 이동/확대 =================
+  function toWorld(sx, sy) {
+    const v = board.view;
+    return [(sx - v.x) / v.s, (sy - v.y) / v.s];
+  }
+
+  function toScreen(wx, wy) {
+    const v = board.view;
+    return [wx * v.s + v.x, wy * v.s + v.y];
+  }
+
+  function zoomAt(sx, sy, factor) {
+    const v = board.view;
+    const s = clamp(v.s * factor, MIN_ZOOM, MAX_ZOOM);
+    const k = s / v.s;
+    v.x = sx - (sx - v.x) * k;
+    v.y = sy - (sy - v.y) * k;
+    v.s = s;
+    viewChanged();
+  }
+
+  function viewChanged() {
+    updateZoomLabel();
+    closePastePopup();
+    invalidate();
+  }
+
+  function updateZoomLabel() {
+    $('#zoom-value').textContent = Math.round(board.view.s * 100) + '%';
+  }
+
+  $('#btn-zoom-in').addEventListener('click', () => zoomAt(cw / 2, ch / 2, 1.25));
+  $('#btn-zoom-out').addEventListener('click', () => zoomAt(cw / 2, ch / 2, 0.8));
+  $('#zoom-value').addEventListener('click', () => zoomAt(cw / 2, ch / 2, 1 / board.view.s));
+  $('#btn-fit').addEventListener('click', () => { board.view = defaultView(board); viewChanged(); });
+
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    if (!board) return;
+    const r = canvas.getBoundingClientRect();
+    const speed = e.ctrlKey ? 0.01 : 0.0015;
+    const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-dy * speed));
+  }, { passive: false });
+
+  // ================= 입력 처리 =================
+  // 펜 / 마우스 왼쪽: 현재 도구 사용
+  // 손가락: 펜을 쓰기 전엔 도구 사용, 펜을 한 번 쓴 뒤엔 화면 이동 (손바닥 오작동 방지)
+  // 두 손가락: 이동 + 확대/축소 / 마우스 가운데·오른쪽·스페이스+드래그: 이동
+  const touches = new Map();
+  let active = null;
+  let panning = null;
+  let gesture = null;
+  let spaceDown = false;
+  let canvasRect = null;
+  let hover = null;
+
+  function localPoint(e) {
+    return [e.clientX - canvasRect.left, e.clientY - canvasRect.top];
+  }
+
+  canvas.addEventListener('pointerdown', e => {
+    if (!board) return;
+    e.preventDefault();
+    closePopups();
+    canvasRect = canvas.getBoundingClientRect();
+    try { canvas.setPointerCapture(e.pointerId); } catch { /* 무시 */ }
+    const [x, y] = localPoint(e);
+
+    if (e.pointerType === 'pen') penSeen = true;
+
+    if (e.pointerType === 'touch') {
+      touches.set(e.pointerId, { x, y });
+      if (touches.size === 2) {
+        // 두 번째 손가락: 하던 작업은 취소하고 제스처로 전환
+        if (active && active.type === 'touch') cancelActive();
+        panning = null;
+        startGesture();
+        return;
+      }
+      if (touches.size > 2 || active || gesture) return;
+    }
+
+    if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2 || spaceDown)) {
+      startPan(e.pointerId, x, y);
+      return;
+    }
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (active) return;
+    beginPrimary(e, x, y, e.pointerType === 'touch' && penSeen);
+  });
+
+  function beginPrimary(e, x, y, fingerNav) {
+    const t = tool.current;
+    if (!fingerNav && handlesActive()) {
+      const hit = hitSelection(x, y);
+      if (hit) { startTransform(e, hit, x, y); return; }
+    }
+    // 톡 누르는 도구: 끌면 화면 이동
+    if (t === 'paste' || t === 'underlay' || t === 'fill') { startPress(e, x, y, t); return; }
+    if (fingerNav) { startPan(e.pointerId, x, y); return; }
+    switch (t) {
+      case 'pen': case 'magic': startDrawing(e, x, y); break;
+      case 'eraser': startErase(e, x, y); break;
+      case 'select': startLasso(e, x, y); break;
+      case 'guide': startGuide(e, x, y); break;
+      case 'shape': tool.shape === 'polygon' ? polygonDown(e, x, y) : startShape(e, x, y); break;
+      case 'curve': curveDown(e, x, y); break;
+      case 'blur': startBlur(e, x, y); break;
+      case 'symmetry': symmetryDown(e, x, y); break;
+    }
+  }
+
+  canvas.addEventListener('pointermove', e => {
+    if (!board) return;
+    canvasRect = canvasRect || canvas.getBoundingClientRect();
+    const id = e.pointerId;
+    const [x, y] = localPoint(e);
+    if (e.pointerType === 'touch' && touches.has(id)) touches.set(id, { x, y });
+    if (e.pointerType !== 'touch') {
+      hover = [x, y];
+      if (!active && (brushCursorRadius() || polyDraft || curveDraft)) requestRender();
+    }
+
+    if (gesture && touches.has(id)) { updateGesture(); return; }
+
+    if (panning && panning.id === id) {
+      board.view.x = panning.vx + (x - panning.sx);
+      board.view.y = panning.vy + (y - panning.sy);
+      viewChanged();
+      return;
+    }
+
+    if (!active || active.id !== id) return;
+    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+    const list = events.length ? events : [e];
+    switch (active.kind) {
+      case 'draw':
+        for (const ev of list) addPoint(ev, ...localPoint(ev));
+        requestRender();
+        break;
+      case 'erase':
+        for (const ev of list) eraseTo(...localPoint(ev));
+        break;
+      case 'guide': guideTo(x, y); break;
+      case 'shape': shapeTo(x, y); break;
+      case 'polypt': polygonMove(x, y); break;
+      case 'curvehandle': case 'curvemove': curveMove(x, y); break;
+      case 'blurpaint':
+        for (const ev of list) blurTo(...localPoint(ev));
+        break;
+      case 'lasso': lassoTo(x, y); break;
+      case 'transform': updateTransform(x, y); break;
+      case 'press': pressMove(x, y); break;
+      case 'symregion': symRegionTo(x, y); break;
+      case 'symaxis': symAxisTo(x, y); break;
+    }
+  });
+
+  canvas.addEventListener('pointerleave', e => {
+    if (e.pointerType !== 'touch') { hover = null; requestRender(); }
+  });
+
+  function endPointer(e) {
+    const id = e.pointerId;
+    touches.delete(id);
+    if (gesture && touches.size < 2) gesture = null;
+    if (panning && panning.id === id) {
+      panning = null;
+      stage.classList.remove('dragging');
+    }
+    if (active && active.id === id) {
+      if (e.type === 'pointercancel' && active.type === 'touch') cancelActive();
+      else finishActive();
+    }
+  }
+
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  document.addEventListener('gesturestart', e => e.preventDefault());
+
+  function finishActive() {
+    const a = active;
+    if (!a) return;
+    switch (a.kind) {
+      case 'draw': finishDrawing(); break;
+      case 'erase': finishErase(); break;
+      case 'guide': finishGuide(); break;
+      case 'shape': finishShape(); break;
+      case 'curvehandle': case 'curvemove': case 'polypt': break;
+      case 'blurpaint': finishBlur(); break;
+      case 'lasso': finishLasso(); break;
+      case 'transform': finishTransform(); break;
+      case 'press': finishPress(); break;
+      case 'symregion': finishSymRegion(); break;
+      case 'symaxis': strokesChanged(); break;
+    }
+    if (active === a) active = null;
+    requestRender();
+  }
+
+  function cancelActive() {
+    const a = active;
+    active = null;
+    if (!a) return;
+    if (a.holdTimer) clearTimeout(a.holdTimer);
+    if (a.timer) clearTimeout(a.timer);
+    // 여러 번 눌러 만드는 도형은 방금 찍은 점만 취소
+    if (a.kind === 'polypt' && polyDraft) { polyDraft.pts.pop(); if (!polyDraft.pts.length) polyDraft = null; }
+    if (a.kind === 'curvehandle' && curveDraft) { curveDraft.anchors.pop(); if (!curveDraft.anchors.length) curveDraft = null; }
+    live.hidden = new Set();
+    live.erase = null;
+    live.transform = null;
+    invalidate();
+  }
+
+  function startPan(id, x, y) {
+    panning = { id, sx: x, sy: y, vx: board.view.x, vy: board.view.y };
+    stage.classList.add('dragging');
+  }
+
+  function gesturePoints() {
+    const [a, b] = [...touches.values()];
+    return { mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, d: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)) };
+  }
+
+  function startGesture() {
+    const g = gesturePoints();
+    const v = board.view;
+    gesture = { ...g, wx: (g.mx - v.x) / v.s, wy: (g.my - v.y) / v.s, s: v.s };
+  }
+
+  function updateGesture() {
+    if (touches.size < 2) return;
+    const g = gesturePoints();
+    const v = board.view;
+    v.s = clamp(gesture.s * g.d / gesture.d, MIN_ZOOM, MAX_ZOOM);
+    v.x = g.mx - gesture.wx * v.s;
+    v.y = g.my - gesture.wy * v.s;
+    viewChanged();
+  }
+
+  // 새 레이어가 들어갈 목록 (자동 그룹이 켜져 있으면 그 그룹 안)
+  function targetList() {
+    const g = autoGroup();
+    return g ? g.children : board.layers;
+  }
+
+  function addLayer(node) {
+    bboxCache.delete(node);
+    checkpoint();
+    targetList().push(node);
+    strokesChanged();
+  }
+
+  // ================= 자동 그룹 =================
+  function autoGroup() {
+    if (!board || !board.autoGroupId) return null;
+    const loc = locateIn(board.autoGroupId, board.layers, null);
+    if (!loc || loc.node.kind !== 'group') {
+      board.autoGroupId = null;
+      updateAutoGroupUI();
+      return null;
+    }
+    return loc.node;
+  }
+
+  function toggleAutoGroup() {
+    if (!board || active) return;
+    if (autoGroup()) {
+      board.autoGroupId = null;
+      markChanged();
+      updateAutoGroupUI();
+      renderLayers();
+      toast('자동 그룹을 껐어요');
+      return;
+    }
+    // 선택한 그룹이 있으면 그 그룹으로, 없으면 새 그룹을 만들어 자동 선택
+    const sel = selectedNodes();
+    let g = sel.length === 1 && sel[0].kind === 'group' && !isUnderlay(sel[0].id) ? sel[0] : null;
+    if (!g) {
+      checkpoint();
+      g = { id: uid(), kind: 'group', name: '그룹 ' + board.nextGroup++, visible: true, children: [] };
+      board.layers.push(g);
+    }
+    board.autoGroupId = g.id;
+    expanded.add(g.id);
+    selection = new Set([g.id]);
+    selBox = computeBox();
+    strokesChanged();
+    updateAutoGroupUI();
+    toast(`이제 새 레이어는 '${g.name}'에 들어가요`);
+  }
+
+  function updateAutoGroupUI() {
+    const g = board && board.autoGroupId ? locateIn(board.autoGroupId, board.layers, null)?.node : null;
+    const btn = $('#btn-autogroup');
+    btn.setAttribute('aria-pressed', String(!!g));
+    btn.title = g ? '자동 그룹 끄기' : '자동 그룹 켜기 (선택한 그룹, 없으면 새 그룹)';
+    const badge = $('#auto-badge');
+    badge.hidden = !g;
+    if (g) badge.textContent = `자동 그룹 · ${g.name}`;
+  }
+
+  $('#btn-autogroup').addEventListener('click', toggleAutoGroup);
+  $('#auto-badge').addEventListener('click', toggleAutoGroup);
+
+  // 현재 펜 설정으로 선 레이어 만들기
+  function penStroke(points, namePrefix) {
+    const pen = tool.pen;
+    const s = {
+      id: uid(),
+      kind: 'stroke',
+      name: namePrefix ? nextName(namePrefix) : '',
+      pen,
+      color: tool.color,
+      size: tool.penSizes[pen],
+      visible: true,
+      points,
+    };
+    if (pen === 'calligraphy') s.nib = NIB_ANGLE;
+    return s;
+  }
+
+  // ================= 펜 / 매직 펜 =================
+  function startDrawing(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    const stroke = penStroke([round1(wx), round1(wy)]);
+    active = {
+      kind: 'draw',
+      id: e.pointerId,
+      type: e.pointerType,
+      stroke,
+      preview: stroke,
+      lastX: x,
+      lastY: y,
+      lastT: e.timeStamp,
+      wv: 0.55,
+      magic: tool.current === 'magic',
+      holdX: x,
+      holdY: y,
+      snapped: false,
+      holdTimer: 0,
+    };
+    if (stroke.pen === 'brush') stroke.w = [widthFactor(e, 0)];
+    if (active.magic) armHold();
+    requestRender();
+  }
+
+  // 붓펜 굵기: 펜이면 필압, 아니면 속도로 흉내
+  function widthFactor(e, speed) {
+    if (e.pointerType === 'pen' && e.pressure > 0) {
+      active.wv += (0.12 + 0.88 * e.pressure - active.wv) * 0.6;
+    } else {
+      const target = clamp(1.05 - speed * 0.35, 0.3, 1);
+      active.wv += (target - active.wv) * 0.3;
+    }
+    return round2(active.wv);
+  }
+
+  function addPoint(e, x, y) {
+    const a = active;
+    if (a.snapped) return;
+    const d = Math.hypot(x - a.lastX, y - a.lastY);
+    if (d < 1) return;
+    const dt = Math.max(1, e.timeStamp - a.lastT);
+    a.lastX = x;
+    a.lastY = y;
+    a.lastT = e.timeStamp;
+    const [wx, wy] = toWorld(x, y);
+    a.stroke.points.push(round1(wx), round1(wy));
+    if (a.stroke.w) a.stroke.w.push(widthFactor(e, d / dt));
+    if (a.magic && Math.hypot(x - a.holdX, y - a.holdY) > 5) {
+      a.holdX = x;
+      a.holdY = y;
+      armHold();
+    }
+  }
+
+  // 매직 펜: 멈추고 0.5초 누르고 있으면 도형으로 바꿈
+  function armHold() {
+    clearTimeout(active.holdTimer);
+    const a = active;
+    a.holdTimer = setTimeout(() => {
+      if (active !== a || a.snapped) return;
+      const pts = a.stroke.points;
+      let len = 0;
+      for (let i = 2; i < pts.length; i += 2) len += Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]);
+      if (len * board.view.s < 16) return;
+      const r = window.Shapes.recognize(pts);
+      if (!r) return;
+      a.stroke.points = r.points;
+      delete a.stroke.w;
+      a.snapped = true;
+      if (navigator.vibrate) navigator.vibrate(12);
+      toast(r.label, 900);
+      requestRender();
+    }, 500);
+  }
+
+  function finishDrawing() {
+    clearTimeout(active.holdTimer);
+    const s = active.stroke;
+    s.name = nextName('선');
+    addLayer(s);
+  }
+
+  // ================= 가상 선 =================
+  // 채우기에서만 경계로 쓰이는 선 (저장 이미지엔 안 나옴)
+  function startGuide(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    const node = { id: uid(), kind: 'guide', name: '', visible: true, size: 0, points: [round1(wx), round1(wy)] };
+    active = { kind: 'guide', id: e.pointerId, type: e.pointerType, mode: tool.guideMode, node, preview: node, lastScreen: [x, y], start: [round1(wx), round1(wy)] };
+    requestRender();
+  }
+
+  function guideTo(x, y) {
+    const a = active;
+    const [wx, wy] = toWorld(x, y);
+    if (a.mode === 'line') {
+      a.node.points = [...a.start, round1(wx), round1(wy)];
+    } else {
+      if (Math.hypot(x - a.lastScreen[0], y - a.lastScreen[1]) < 1.5) return;
+      a.lastScreen = [x, y];
+      a.node.points.push(round1(wx), round1(wy));
+    }
+    requestRender();
+  }
+
+  function finishGuide() {
+    const n = active.node;
+    if (n.points.length < 4) return;
+    n.name = nextName('가상 선');
+    addLayer(n);
+  }
+
+  // ================= 도형 =================
+  function shapeNodeFrom(pts, closed, seed, filled, noise, name) {
+    const path = window.Shapes.roughen(pts, closed, noise, seed);
+    const flat = window.Shapes.toFlat(path);
+    if (filled && closed) {
+      return { id: uid(), kind: 'fill', name: name ? nextName(name) : '', color: tool.color, visible: true, paths: [flat] };
+    }
+    return penStroke(flat, name);
+  }
+
+  function startShape(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    active = {
+      kind: 'shape',
+      id: e.pointerId,
+      type: e.pointerType,
+      a: { x: wx, y: wy },
+      b: { x: wx, y: wy },
+      seed: (Math.random() * 1e9) | 0,
+      sx: x,
+      sy: y,
+      moved: false,
+      preview: null,
+    };
+  }
+
+  function shapeTo(x, y) {
+    const a = active;
+    const [wx, wy] = toWorld(x, y);
+    a.b = { x: wx, y: wy };
+    if (Math.hypot(x - a.sx, y - a.sy) > 4) a.moved = true;
+    if (!a.moved) return;
+    const g = window.Shapes.generate(tool.shape, a.a, a.b, { square: tool.shapeSquare || shiftDown });
+    a.preview = shapeNodeFrom(g.pts, g.closed, a.seed, tool.shapeFilled, tool.noise);
+    requestRender();
+  }
+
+  function finishShape() {
+    const a = active;
+    if (!a.moved || !a.preview) return;
+    const label = SHAPES.find(s => s.id === tool.shape).label;
+    a.preview.name = nextName(label);
+    addLayer(a.preview);
+  }
+
+  // 다각형: 톡톡 눌러 꼭짓점 → 첫 점을 누르면 닫힘
+  function polygonDown(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    if (!polyDraft) polyDraft = { pts: [], seed: (Math.random() * 1e9) | 0, purpose: tool.current === 'symmetry' ? 'symmetry' : 'shape' };
+    const pts = polyDraft.pts;
+    if (pts.length >= 3) {
+      const [fx, fy] = toScreen(pts[0].x, pts[0].y);
+      if (Math.hypot(x - fx, y - fy) < 16) { commitPolygon(true); return; }
+    }
+    pts.push({ x: wx, y: wy });
+    active = { kind: 'polypt', id: e.pointerId, type: e.pointerType };
+    buildContextBar();
+    requestRender();
+  }
+
+  function polygonMove(x, y) {
+    const [wx, wy] = toWorld(x, y);
+    const pts = polyDraft.pts;
+    pts[pts.length - 1] = { x: wx, y: wy };
+    requestRender();
+  }
+
+  function draftPolygonNode(extra, closed = false) {
+    const pts = extra ? [...polyDraft.pts, { x: extra[0], y: extra[1] }] : polyDraft.pts;
+    if (pts.length < 2) return null;
+    if (polyDraft.purpose === 'symmetry') return makeSymmetry(window.Shapes.toFlat(pts), 'polygon', true);
+    return shapeNodeFrom(pts, closed, polyDraft.seed, closed && tool.shapeFilled, tool.noise);
+  }
+
+  function commitPolygon(closed) {
+    const d = polyDraft;
+    polyDraft = null;
+    if (d && d.purpose === 'symmetry') {
+      if (d.pts.length >= 3) addSymmetry(makeSymmetry(window.Shapes.toFlat(d.pts), 'polygon'));
+    } else if (d && d.pts.length >= (closed ? 3 : 2)) {
+      const n = shapeNodeFrom(d.pts, closed, d.seed, closed && tool.shapeFilled, tool.noise, '다각형');
+      addLayer(n);
+    }
+    buildContextBar();
+    requestRender();
+  }
+
+  // ================= 베지에 곡선 =================
+  // 톡 누르면 꼭짓점, 누른 채 끌면 곡선 손잡이, 첫 점을 누르면 닫힌 도형
+  function curveDown(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    if (!curveDraft) curveDraft = { anchors: [] };
+    const A = curveDraft.anchors;
+    const near = i => { const [ax, ay] = toScreen(A[i].x, A[i].y); return Math.hypot(x - ax, y - ay) < 14; };
+    if (A.length >= 2 && near(0)) { commitCurve(true); return; }
+    for (let i = A.length - 1; i >= 0; i--) {
+      if (near(i)) {
+        active = { kind: 'curvemove', id: e.pointerId, type: e.pointerType, idx: i };
+        return;
+      }
+    }
+    A.push({ x: wx, y: wy, hx: 0, hy: 0 });
+    active = { kind: 'curvehandle', id: e.pointerId, type: e.pointerType, idx: A.length - 1, sx: x, sy: y };
+    buildContextBar();
+    requestRender();
+  }
+
+  function curveMove(x, y) {
+    const a = active;
+    const [wx, wy] = toWorld(x, y);
+    const p = curveDraft.anchors[a.idx];
+    if (a.kind === 'curvemove') {
+      p.x = wx; p.y = wy;
+    } else if (Math.hypot(x - a.sx, y - a.sy) > 3) {
+      p.hx = wx - p.x; p.hy = wy - p.y;
+    }
+    requestRender();
+  }
+
+  function draftCurveNode(closed, extra) {
+    const A = extra ? [...curveDraft.anchors, { x: extra[0], y: extra[1], hx: 0, hy: 0 }] : curveDraft.anchors;
+    if (A.length < 2) return null;
+    const pts = window.Shapes.bezier(A, closed);
+    const flat = window.Shapes.toFlat(pts);
+    if (closed && tool.curveFilled) return { id: uid(), kind: 'fill', name: '', color: tool.color, visible: true, paths: [flat] };
+    return penStroke(flat);
+  }
+
+  function commitCurve(closed) {
+    const d = curveDraft;
+    if (d && d.anchors.length >= 2) {
+      const n = draftCurveNode(closed);
+      n.name = nextName(closed ? '곡선 도형' : '곡선');
+      curveDraft = null;
+      addLayer(n);
+    } else {
+      curveDraft = null;
+    }
+    buildContextBar();
+    requestRender();
+  }
+
+  // 다른 도구로 가거나 캔버스를 바꿀 때 만들던 도형을 열린 선으로 마무리
+  function finishDrafts() {
+    if (polyDraft) commitPolygon(polyDraft.purpose === 'symmetry');
+    if (curveDraft) commitCurve(false);
+  }
+
+  // ================= 자동 대칭 =================
+  let symEditId = null;
+
+  function currentSym() {
+    if (!symEditId || !board) return null;
+    const n = locate(symEditId)?.node;
+    return n && n.kind === 'symmetry' ? n : null;
+  }
+
+  function makeSymmetry(region, shape, preview) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < region.length; i += 2) {
+      x0 = Math.min(x0, region[i]); x1 = Math.max(x1, region[i]);
+      y0 = Math.min(y0, region[i + 1]); y1 = Math.max(y1, region[i + 1]);
+    }
+    const n = {
+      id: uid(),
+      kind: 'symmetry',
+      name: preview ? '' : nextName('자동 대칭'),
+      visible: true,
+      shape,
+      region,
+      cx: round1((x0 + x1) / 2),
+      cy: round1((y0 + y1) / 2),
+      angle: 0,
+      v: tool.symV ? 0 : null,
+      h: tool.symH ? 0 : null,
+    };
+    if (n.v == null && n.h == null) n.v = 0;
+    return n;
+  }
+
+  function addSymmetry(n) {
+    symEditId = n.id;
+    addLayer(n);
+    buildContextBar();
+    toast('축 손잡이를 끌어 옮길 수 있어요 · 이 레이어 위에 그린 것이 반전돼요', 3000);
+  }
+
+  // 축 위를 눌렀는지 (화면 좌표)
+  function hitSymAxis(n, x, y) {
+    const b = leafBBox(n);
+    const [bx0, by0] = toScreen(b[0], b[1]), [bx1, by1] = toScreen(b[2], b[3]);
+    if (x < bx0 - 24 || x > bx1 + 24 || y < by0 - 24 || y > by1 + 24) return null;
+    let best = null, bd = 16;
+    for (const ax of symAxes(n)) {
+      const [px, py] = toScreen(ax.x, ax.y);
+      const dx = Math.cos(ax.dir), dy = Math.sin(ax.dir);
+      const d = Math.abs((x - px) * dy - (y - py) * dx);
+      if (d < bd) { bd = d; best = ax.which; }
+    }
+    return best;
+  }
+
+  function symAt(wx, wy) {
+    const syms = collectSyms();
+    for (let i = syms.length - 1; i >= 0; i--) {
+      if (pointInPoly(wx, wy, syms[i].region)) return syms[i];
+    }
+    return null;
+  }
+
+  function symmetryDown(e, x, y) {
+    const cur = currentSym();
+    const which = cur && hitSymAxis(cur, x, y);
+    if (which) {
+      checkpoint();
+      const copy = { ...cur };
+      replaceNode(cur.id, () => copy);
+      active = { kind: 'symaxis', id: e.pointerId, type: e.pointerType, node: copy, which };
+      return;
+    }
+    if (tool.symShape === 'polygon') { polygonDown(e, x, y); return; }
+    const [wx, wy] = toWorld(x, y);
+    active = { kind: 'symregion', id: e.pointerId, type: e.pointerType, a: { x: wx, y: wy }, b: { x: wx, y: wy }, sx: x, sy: y, moved: false, preview: null };
+  }
+
+  function symAxisTo(x, y) {
+    const n = active.node;
+    const [wx, wy] = toWorld(x, y);
+    const a = n.angle || 0, co = Math.cos(a), si = Math.sin(a);
+    const dx = wx - n.cx, dy = wy - n.cy;
+    let off = active.which === 'v' ? dx * co + dy * si : -dx * si + dy * co;
+    // 가운데 근처면 가운데에 붙임
+    if (Math.abs(off) * board.view.s < 8) off = 0;
+    n[active.which] = round1(off);
+    invalidate();
+  }
+
+  function symRegionGeometry(a, b) {
+    if (tool.symShape === 'ellipse') {
+      return window.Shapes.toFlat(window.Shapes.generate('ellipse', a, b).pts);
+    }
+    const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x), y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
+    return [x0, y0, x1, y0, x1, y1, x0, y1].map(round1);
+  }
+
+  function symRegionTo(x, y) {
+    const a = active;
+    a.b = { x: toWorld(x, y)[0], y: toWorld(x, y)[1] };
+    if (Math.hypot(x - a.sx, y - a.sy) > 6) a.moved = true;
+    if (!a.moved) return;
+    a.preview = makeSymmetry(symRegionGeometry(a.a, a.b), tool.symShape, true);
+    requestRender();
+  }
+
+  function finishSymRegion() {
+    const a = active;
+    if (!a.moved) {
+      // 톡: 그 자리의 대칭을 골라 편집
+      const n = symAt(a.a.x, a.a.y);
+      symEditId = n ? n.id : null;
+      buildContextBar();
+      requestRender();
+      return;
+    }
+    const n = makeSymmetry(symRegionGeometry(a.a, a.b), tool.symShape);
+    active = null;
+    addSymmetry(n);
+  }
+
+  // 축 켜고 끄기: 고른 대칭이 있으면 그 대칭에, 없으면 새로 만들 대칭의 기본값
+  function toggleSymAxis(which) {
+    const key = which === 'v' ? 'symV' : 'symH';
+    const cur = currentSym();
+    if (cur) {
+      checkpoint();
+      replaceNode(cur.id, n => ({ ...n, [which]: n[which] == null ? 0 : null }));
+      strokesChanged();
+    } else {
+      tool[key] = !tool[key];
+    }
+    syncToolUI();
+  }
+
+  // ================= 흐림 =================
+  function startBlur(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    const node = { id: uid(), kind: 'blur', name: '', visible: true, size: tool.blurSize, strength: tool.blurStrength, points: [round1(wx), round1(wy)] };
+    active = { kind: 'blurpaint', id: e.pointerId, type: e.pointerType, node, lastScreen: [x, y], cursor: [x, y] };
+    invalidate();
+  }
+
+  function blurTo(x, y) {
+    const a = active;
+    a.cursor = [x, y];
+    if (Math.hypot(x - a.lastScreen[0], y - a.lastScreen[1]) < 2) { requestRender(); return; }
+    a.lastScreen = [x, y];
+    const [wx, wy] = toWorld(x, y);
+    a.node.points.push(round1(wx), round1(wy));
+    bboxCache.delete(a.node);
+    invalidate();
+  }
+
+  function finishBlur() {
+    const n = active.node;
+    bboxCache.delete(n);
+    n.name = nextName('흐림');
+    active = null;
+    addLayer(n);
+  }
+
+  // ================= 채우기 =================
+  // 둘러싸인 영역을 본떠 새 레이어(면)를 만든다. 선과 가상 선이 경계가 된다.
+  function fillAt(sx, sy) {
+    const [px, py] = toWorld(sx, sy);
+    const [wx0, wy0] = toWorld(0, 0);
+    const [wx1, wy1] = toWorld(cw, ch);
+    const area = (wx1 - wx0) * (wy1 - wy0);
+    const k = Math.min(board.view.s * Math.min(dpr, 2), Math.sqrt(4e6 / area));
+    const W = Math.ceil((wx1 - wx0) * k), H = Math.ceil((wy1 - wy0) * k);
+    const c = document.createElement('canvas');
+    c.width = W;
+    c.height = H;
+    const x = c.getContext('2d', { willReadFrequently: true });
+    x.setTransform(k, 0, 0, k, -wx0 * k, -wy0 * k);
+
+    // 경계 그리기: 선과 가상 선 (자동 대칭으로 반전된 사본 포함)
+    drawNodes(x, board.layers, null, 'walls');
+    const inPage = board.type === 'main' && px >= 0 && py >= 0 && px <= project.width && py <= project.height;
+    if (inPage) {
+      x.strokeStyle = '#000';
+      x.lineWidth = 2 / k;
+      x.strokeRect(0, 0, project.width, project.height);
+    }
+
+    const data = x.getImageData(0, 0, W, H).data;
+    const wall = new Uint8Array(W * H);
+    for (let i = 0; i < wall.length; i++) wall[i] = data[i * 4 + 3] > 40 ? 1 : 0;
+    const res = window.Raster.flood(wall, W, H, Math.floor((px - wx0) * k), Math.floor((py - wy0) * k));
+    if (!res) { toast('선 위가 아니라 선으로 둘러싸인 안쪽을 눌러 주세요'); return; }
+    if (res.touchesEdge) {
+      toast('닫힌 영역이 아니에요 · 틈은 가상 선으로 막고, 화면 밖까지 이어지면 축소해 주세요', 3500);
+      return;
+    }
+    const mask = window.Raster.dilate(res.mask, W, H);
+    const paths = window.Raster.trace(mask, W, H)
+      .map(l => window.Raster.simplify(l, 0.8))
+      .filter(l => l.length >= 6 && Math.abs(window.Raster.polyArea(l)) > 4)
+      .map(l => l.map((v, i) => round1(i % 2 ? v / k + wy0 : v / k + wx0)));
+    if (!paths.length) return;
+
+    const node = { id: uid(), kind: 'fill', name: nextName('채우기'), color: tool.color, visible: true, paths };
+    checkpoint();
+    // 채우기 면은 선보다 뒤에: 기존 채우기 면들 바로 위에 넣음
+    let at = 0;
+    const list = targetList();
+    // 기존 채우기 면 위, 그리고 이 영역에 걸친 자동 대칭 레이어 위 (그래야 함께 반전됨)
+    const fb = leafBBox(node);
+    list.forEach((n, i) => {
+      if (n.kind === 'fill') at = i + 1;
+      if (leavesOf(n).some(l => {
+        if (l.kind !== 'symmetry') return false;
+        const rb = leafBBox(l);
+        return !(fb[2] < rb[0] || fb[0] > rb[2] || fb[3] < rb[1] || fb[1] > rb[3]);
+      })) at = i + 1;
+    });
+    list.splice(at, 0, node);
+    strokesChanged();
+  }
+
+  // ================= 지우개 =================
+  function startErase(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    const mode = tool.eraserMode;
+    const size = mode === 'layer' ? LAYER_ERASER_PX * 2 / board.view.s : tool.eraserSize;
+    const path = { size, points: [round1(wx), round1(wy)] };
+    active = {
+      kind: 'erase',
+      id: e.pointerId,
+      type: e.pointerType,
+      mode,
+      path,
+      last: [wx, wy],
+      lastScreen: [x, y],
+      cursor: [x, y],
+      hits: new Set(),
+    };
+    if (mode === 'area') live.erase = { path, strokes: active.hits };
+    else live.hidden = active.hits;
+    eraseSegment(wx, wy, wx, wy);
+    invalidate();
+  }
+
+  function eraseTo(x, y) {
+    const a = active;
+    a.cursor = [x, y];
+    if (Math.hypot(x - a.lastScreen[0], y - a.lastScreen[1]) < 1) { requestRender(); return; }
+    const [wx, wy] = toWorld(x, y);
+    eraseSegment(a.last[0], a.last[1], wx, wy);
+    a.path.points.push(round1(wx), round1(wy));
+    a.last = [wx, wy];
+    a.lastScreen = [x, y];
+    if (a.mode === 'area') invalidate();
+    else requestRender();
+  }
+
+  function eraseSegment(ax, ay, bx, by) {
+    const a = active;
+    const r = a.path.size / 2;
+    if (a.mode === 'layer') {
+      let changed = false;
+      // 레이어 지우개: 지나간 자리의 맨 위 레이어만 지움 (아래에 깔린 채우기 면 등은 남김)
+      const leaves = allLeaves(true);
+      const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / r));
+      for (let s = 0; s <= steps; s++) {
+        const x = ax + (bx - ax) * s / steps, y = ay + (by - ay) * s / steps;
+        const hit = topLeafAt(leaves, x, y, r);
+        if (hit && !a.hits.has(hit.id)) { a.hits.add(hit.id); changed = true; }
+      }
+      if (changed) invalidate();
+      return;
+    }
+    for (const n of allLeaves(true)) {
+      if (a.hits.has(n.id)) continue;
+      // 영역 지우개는 그림(선, 채우기 면, 이미지)만 뚫음
+      if (!(n.kind === 'stroke' || n.kind === 'fill' || n.kind === 'image')) continue;
+      if (leafNearSegment(n, ax, ay, bx, by, r)) {
+        a.hits.add(n.id);
+      }
+    }
+  }
+
+  function finishErase() {
+    const a = active;
+    live.erase = null;
+    live.hidden = new Set();
+    if (a.hits.size) {
+      checkpoint();
+      if (a.mode === 'area') {
+        const path = { size: round2(a.path.size), points: a.path.points.slice() };
+        for (const id of a.hits) replaceNode(id, s => ({ ...s, erase: [...(s.erase || []), path] }));
+      } else {
+        removeNodes(a.hits);
+        pruneSelection();
+      }
+      strokesChanged();
+    } else {
+      invalidate();
+    }
+  }
+
+  // ================= 영역 선택 =================
+  function startLasso(e, x, y) {
+    const [wx, wy] = toWorld(x, y);
+    active = {
+      kind: 'lasso',
+      id: e.pointerId,
+      type: e.pointerType,
+      mode: tool.selectMode,
+      pts: [wx, wy],
+      end: [wx, wy],
+      screenLen: 0,
+      lastScreen: [x, y],
+    };
+    requestRender();
+  }
+
+  function lassoTo(x, y) {
+    const a = active;
+    const d = Math.hypot(x - a.lastScreen[0], y - a.lastScreen[1]);
+    if (d < 2) return;
+    a.screenLen += d;
+    a.lastScreen = [x, y];
+    const [wx, wy] = toWorld(x, y);
+    a.end = [wx, wy];
+    if (a.mode === 'lasso') a.pts.push(wx, wy);
+    requestRender();
+  }
+
+  function lassoPolygon(a) {
+    if (a.mode === 'rect') {
+      const [x0, y0] = [a.pts[0], a.pts[1]], [x1, y1] = a.end;
+      return [x0, y0, x1, y0, x1, y1, x0, y1];
+    }
+    return a.pts;
+  }
+
+  // 영역을 덮는 레이어(흐림, 자동 대칭)는 그 아래 그림을 가리지 않도록 마지막에 고름
+  const OVERLAY_KINDS = new Set(['blur', 'symmetry']);
+
+  function topLeafAt(leaves, wx, wy, tol) {
+    for (const overlay of [false, true]) {
+      for (let i = leaves.length - 1; i >= 0; i--) {
+        const n = leaves[i];
+        if (OVERLAY_KINDS.has(n.kind) !== overlay) continue;
+        if (leafNearSegment(n, wx, wy, wx, wy, tol)) return n;
+      }
+    }
+    return null;
+  }
+
+  // 그 점의 맨 앞 레이어 (최상위 노드)
+  function topNodeAt(list, wx, wy) {
+    const leaves = [];
+    for (const n of list) leavesOf(n, leaves, true);
+    const hit = topLeafAt(leaves, wx, wy, 10 / board.view.s);
+    return hit ? pathTo(hit.id)[0] : null;
+  }
+
+  function finishLasso() {
+    const a = active;
+    if (a.screenLen < 6) {
+      // 가볍게 톡: 그 자리의 맨 앞 레이어를 고르거나, 빈 곳이면 선택 해제
+      const n = topNodeAt(board.layers, ...a.end);
+      setSelection(n ? [n.id] : []);
+      return;
+    }
+    const poly = lassoPolygon(a);
+    let pb = [Infinity, Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < poly.length; i += 2) {
+      pb = [Math.min(pb[0], poly[i]), Math.min(pb[1], poly[i + 1]), Math.max(pb[2], poly[i]), Math.max(pb[3], poly[i + 1])];
+    }
+    const ids = [];
+    for (const n of board.layers) {
+      if (!n.visible) continue;
+      if (leavesOf(n, [], true).some(s => leafInPoly(s, poly, pb))) ids.push(n.id);
+    }
+    setSelection(ids);
+  }
+
+  // ================= 선택 상태 =================
+  function normalizeSelection(ids) {
+    const out = new Set();
+    for (const id of ids) {
+      const path = pathTo(id);
+      if (!path) continue;
+      if (path.slice(0, -1).some(g => ids.has(g.id))) continue;
+      out.add(id);
+    }
+    return out;
+  }
+
+  function selectedNodes() {
+    const order = orderIndex();
+    return [...selection].map(id => locate(id)?.node).filter(Boolean)
+      .sort((a, b) => order.get(a.id) - order.get(b.id));
+  }
+
+  function computeBox() {
+    const nodes = selectedNodes();
+    if (!nodes.length) return null;
+    const [x0, y0, x1, y1] = nodesBBox(nodes);
+    if (!isFinite(x0)) return null;
+    return { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, hw: (x1 - x0) / 2, hh: (y1 - y0) / 2, angle: 0 };
+  }
+
+  function setSelection(ids) {
+    selection = normalizeSelection(new Set(ids));
+    selBox = computeBox();
+    selectionChanged();
+  }
+
+  // 지워진 노드를 선택에서 빼고 상자를 다시 계산
+  function pruneSelection() {
+    const before = selection.size;
+    selection = normalizeSelection(selection);
+    if (selection.size !== before || !selBox) selBox = computeBox();
+    if (!selection.size) selBox = null;
+  }
+
+  function selectionChanged() {
+    updateSelectionUI();
+    renderLayers();
+    requestRender();
+  }
+
+  function handlesActive() {
+    return !!(selBox && selection.size && ['select', 'paste', 'underlay'].includes(tool.current));
+  }
+
+  function boxScreen() {
+    const { cx, cy, hw, hh, angle } = selBox;
+    const pad = 8 / board.view.s;
+    const co = Math.cos(angle), si = Math.sin(angle);
+    const corner = (u, v) => toScreen(cx + u * co - v * si, cy + u * si + v * co);
+    const W = hw + pad, H = hh + pad;
+    const pts = [corner(-W, -H), corner(W, -H), corner(W, H), corner(-W, H)];
+    const topMid = [(pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2];
+    let ux = pts[0][0] - pts[3][0], uy = pts[0][1] - pts[3][1];
+    const ul = Math.hypot(ux, uy) || 1;
+    ux /= ul; uy /= ul;
+    const rot = [topMid[0] + ux * 30, topMid[1] + uy * 30];
+    return { pts, topMid, rot, center: toScreen(cx, cy) };
+  }
+
+  function hitSelection(x, y) {
+    if (!selBox) return null;
+    const b = boxScreen();
+    const R = 22;
+    if (Math.hypot(x - b.rot[0], y - b.rot[1]) < R) return 'rotate';
+    if (Math.hypot(x - b.pts[2][0], y - b.pts[2][1]) < R) return 'scale';
+    if (pointInPoly(x, y, b.pts.flat())) return 'move';
+    return null;
+  }
+
+  // ================= 이동 / 회전 / 크기 =================
+  function startTransform(e, mode, x, y) {
+    const w0 = toWorld(x, y);
+    const c = [selBox.cx, selBox.cy];
+    active = {
+      kind: 'transform',
+      id: e.pointerId,
+      type: e.pointerType,
+      mode,
+      w0,
+      c,
+      a0: Math.atan2(w0[1] - c[1], w0[0] - c[0]),
+      d0: Math.max(1e-6, Math.hypot(w0[0] - c[0], w0[1] - c[1])),
+      m: Mat.identity(),
+    };
+    live.transform = { ids: new Set(selection), m: active.m };
+    invalidate();
+  }
+
+  function updateTransform(x, y) {
+    const a = active;
+    const [wx, wy] = toWorld(x, y);
+    const [cx, cy] = a.c;
+    if (a.mode === 'move') {
+      a.m = Mat.translate(wx - a.w0[0], wy - a.w0[1]);
+    } else if (a.mode === 'rotate') {
+      let ang = Math.atan2(wy - cy, wx - cx) - a.a0;
+      // 45° 단위 근처면 딱 맞춤
+      const total = selBox.angle + ang;
+      const snapped = Math.round(total / (Math.PI / 4)) * (Math.PI / 4);
+      if (Math.abs(total - snapped) < 4 * Math.PI / 180) ang = snapped - selBox.angle;
+      a.m = Mat.rotateAbout(ang, cx, cy);
+    } else {
+      const k = Math.max(0.05, Math.hypot(wx - cx, wy - cy) / a.d0);
+      a.m = Mat.scaleAbout(k, cx, cy);
+    }
+    live.transform.m = a.m;
+    invalidate();
+  }
+
+  function finishTransform() {
+    const m = active.m;
+    live.transform = null;
+    const moved = Math.abs(m[4]) + Math.abs(m[5]) > 0.01 || Math.abs(m[0] - 1) > 1e-4 || Math.abs(m[1]) > 1e-4;
+    if (!moved) { invalidate(); return; }
+    applyTransform(m);
+  }
+
+  function applyTransform(m) {
+    checkpoint();
+    for (const id of selection) replaceNode(id, n => transformNode(n, m));
+    const [cx, cy] = Mat.apply(m, selBox.cx, selBox.cy);
+    const k = Math.hypot(m[0], m[1]);
+    const mirrored = m[0] * m[3] - m[1] * m[2] < 0;
+    selBox = { cx, cy, hw: selBox.hw * k, hh: selBox.hh * k, angle: mirrored ? selBox.angle : selBox.angle + Math.atan2(m[1], m[0]) };
+    strokesChanged();
+  }
+
+  // ================= 선택한 것 다루기 =================
+  function requireSelection() {
+    if (selection.size) return true;
+    toast('먼저 레이어를 선택하세요');
+    return false;
+  }
+
+  function copySelection() {
+    if (!requireSelection()) return;
+    const nodes = selectedNodes().map(deepCopy);
+    clipboard.unshift({ id: uid(), t: Date.now(), nodes });
+    clipboard = clipboard.slice(0, 24);
+    if (!storage.set(CLIP_KEY, clipboard)) toast('복사는 됐지만 저장 공간이 부족해요');
+    else toast('복사했어요 · 붙여넣기 도구로 화면을 꾹 누르세요');
+  }
+
+  function deleteSelection() {
+    if (!requireSelection()) return;
+    checkpoint();
+    removeNodes(selection);
+    selection = new Set();
+    selBox = null;
+    strokesChanged();
+  }
+
+  // 좌우 / 상하 반전 (선택 상자의 축 기준)
+  function flipSelection(horizontal) {
+    if (!requireSelection()) return;
+    if (!selBox) selBox = computeBox();
+    const phi = selBox.angle + (horizontal ? Math.PI / 2 : 0);
+    applyTransform(Mat.reflectAbout(phi, selBox.cx, selBox.cy));
+  }
+
+  function rotateSelection90() {
+    if (!requireSelection()) return;
+    if (!selBox) selBox = computeBox();
+    applyTransform(Mat.rotateAbout(Math.PI / 2, selBox.cx, selBox.cy));
+  }
+
+  function groupSelection() {
+    const nodes = selectedNodes();
+    if (nodes.length < 2) { toast('두 개 이상 선택해야 묶을 수 있어요'); return; }
+    const under = nodes.map(n => isUnderlay(n.id));
+    if (under.some(u => u !== under[0])) { toast('밑그림과 일반 레이어는 함께 묶을 수 없어요'); return; }
+    checkpoint();
+    const front = locate(nodes[nodes.length - 1].id);
+    const g = { id: uid(), kind: 'group', name: '그룹 ' + board.nextGroup++, visible: true, children: [] };
+    front.list.splice(front.index + 1, 0, g);
+    for (const n of nodes) {
+      const loc = locate(n.id);
+      loc.list.splice(loc.index, 1);
+    }
+    g.children = nodes;
+    removeNodes(new Set()); // 비어 버린 그룹 정리
+    selection = new Set([g.id]);
+    selBox = computeBox();
+    strokesChanged();
+  }
+
+  function ungroupSelection() {
+    const groups = selectedNodes().filter(n => n.kind === 'group');
+    if (!groups.length) { toast('선택한 것 중에 그룹이 없어요'); return; }
+    checkpoint();
+    const next = [...selection].filter(id => !groups.some(g => g.id === id));
+    for (const g of groups) {
+      const loc = locate(g.id);
+      const kids = g.visible ? g.children : g.children.map(c => (c.kind === 'group' ? Object.assign(c, { visible: false }) : { ...c, visible: false }));
+      loc.list.splice(loc.index, 1, ...kids);
+      next.push(...kids.map(k => k.id));
+      expanded.delete(g.id);
+    }
+    selection = normalizeSelection(new Set(next));
+    selBox = computeBox();
+    strokesChanged();
+  }
+
+  function treeSignature() {
+    const ids = n => n.kind === 'group' ? [n.id, n.children.map(ids)] : n.id;
+    return JSON.stringify([board.layers.map(ids), board.underlays.map(ids)]);
+  }
+
+  // 앞/뒤 순서 바꾸기 (같은 그룹 안에서)
+  function reorderSelection(dir) {
+    if (!requireSelection()) return;
+    const lists = new Set();
+    for (const id of selection) {
+      const loc = locate(id);
+      if (loc) lists.add(loc.list);
+    }
+    const before = treeSignature();
+    const snap = snapshot();
+    const sel = n => selection.has(n.id);
+    for (const list of lists) {
+      if (dir === 'forward') {
+        for (let i = list.length - 2; i >= 0; i--) {
+          if (sel(list[i]) && !sel(list[i + 1])) [list[i], list[i + 1]] = [list[i + 1], list[i]];
+        }
+      } else if (dir === 'backward') {
+        for (let i = 1; i < list.length; i++) {
+          if (sel(list[i]) && !sel(list[i - 1])) [list[i], list[i - 1]] = [list[i - 1], list[i]];
+        }
+      } else {
+        const picked = list.filter(sel), rest = list.filter(n => !sel(n));
+        list.splice(0, list.length, ...(dir === 'front' ? [...rest, ...picked] : [...picked, ...rest]));
+      }
+    }
+    if (before === treeSignature()) { toast(dir === 'forward' || dir === 'front' ? '이미 맨 앞이에요' : '이미 맨 뒤예요'); return; }
+    pushUndo(snap);
+    strokesChanged();
+  }
+
+  // 레이어 ↔ 밑그림
+  function moveSelectionTo(toUnder) {
+    if (!requireSelection()) return;
+    const nodes = selectedNodes().filter(n => isUnderlay(n.id) !== toUnder);
+    if (!nodes.length) { toast(toUnder ? '이미 밑그림이에요' : '선택한 것 중에 밑그림이 없어요'); return; }
+    checkpoint();
+    removeNodes(new Set(nodes.map(n => n.id)));
+    (toUnder ? board.underlays : board.layers).push(...nodes);
+    removeNodes(new Set());
+    pruneSelection();
+    selBox = computeBox();
+    strokesChanged();
+    toast(toUnder ? '밑그림으로 바꿨어요 · 다운로드에는 포함되지 않아요' : '일반 레이어로 되돌렸어요');
+  }
+
+  function toggleVisibility(id) {
+    const loc = locate(id);
+    if (!loc) return;
+    checkpoint();
+    if (loc.node.kind === 'group') loc.node.visible = !loc.node.visible;
+    else loc.list[loc.index] = { ...loc.node, visible: !loc.node.visible };
+    strokesChanged();
+  }
+
+  const ACTIONS = {
+    copy: copySelection,
+    rotate: rotateSelection90,
+    flipx: () => flipSelection(true),
+    flipy: () => flipSelection(false),
+    group: groupSelection,
+    ungroup: ungroupSelection,
+    delete: deleteSelection,
+    clear: () => setSelection([]),
+    front: () => reorderSelection('front'),
+    forward: () => reorderSelection('forward'),
+    backward: () => reorderSelection('backward'),
+    back: () => reorderSelection('back'),
+    'to-underlay': () => moveSelectionTo(true),
+    'from-underlay': () => moveSelectionTo(false),
+  };
+
+  for (const b of document.querySelectorAll('#selection-bar [data-act], #layer-actions [data-act]')) {
+    b.addEventListener('click', () => { if (board && !active) ACTIONS[b.dataset.act](); });
+  }
+
+  function updateSelectionUI() {
+    const bar = $('#selection-bar');
+    const n = selection.size;
+    bar.hidden = !n;
+    const nodes = n ? selectedNodes() : [];
+    const hasGroup = nodes.some(x => x.kind === 'group');
+    const anyUnder = nodes.some(x => isUnderlay(x.id));
+    const anyLayer = nodes.some(x => !isUnderlay(x.id));
+    if (n) {
+      $('#selection-count').textContent = `${n}개 선택`;
+      bar.querySelector('[data-act="group"]').disabled = n < 2;
+      bar.querySelector('[data-act="ungroup"]').disabled = !hasGroup;
+    }
+    const la = $('#layer-actions');
+    la.querySelector('[data-act="group"]').disabled = n < 2;
+    la.querySelector('[data-act="ungroup"]').disabled = !hasGroup;
+    la.querySelector('[data-act="to-underlay"]').disabled = !anyLayer;
+    la.querySelector('[data-act="from-underlay"]').disabled = !anyUnder;
+    for (const act of ['front', 'forward', 'backward', 'back', 'delete']) la.querySelector(`[data-act="${act}"]`).disabled = !n;
+  }
+
+  // ================= 톡 누르기 (붙여넣기 / 밑그림 / 채우기) =================
+  function startPress(e, x, y, purpose) {
+    const a = {
+      kind: 'press',
+      purpose,
+      id: e.pointerId,
+      type: e.pointerType,
+      sx: x,
+      sy: y,
+      fired: false,
+      timer: 0,
+    };
+    if (purpose === 'paste') {
+      a.timer = setTimeout(() => {
+        if (active !== a) return;
+        a.fired = true;
+        if (navigator.vibrate) navigator.vibrate(12);
+        openPastePopup(a.sx, a.sy);
+      }, 480);
+    }
+    active = a;
+  }
+
+  function pressMove(x, y) {
+    const a = active;
+    if (a.fired) return;
+    if (Math.hypot(x - a.sx, y - a.sy) > 8) {
+      // 톡이 아니라 끌기 → 화면 이동
+      clearTimeout(a.timer);
+      active = null;
+      startPan(a.id, a.sx, a.sy);
+      board.view.x = panning.vx + (x - a.sx);
+      board.view.y = panning.vy + (y - a.sy);
+      viewChanged();
+    }
+  }
+
+  function finishPress() {
+    const a = active;
+    clearTimeout(a.timer);
+    if (a.fired) return;
+    if (a.purpose === 'paste') toast('화면을 꾹 누르면 복사한 것을 붙여넣을 수 있어요');
+    else if (a.purpose === 'fill') fillAt(a.sx, a.sy);
+    else if (a.purpose === 'underlay') {
+      const n = topNodeAt(board.underlays, ...toWorld(a.sx, a.sy));
+      setSelection(n ? [n.id] : []);
+      if (!n && board.underlays.length) toast('밑그림을 톡 눌러 선택하면 옮기거나 돌릴 수 있어요');
+    }
+  }
+
+  // ================= 붙여넣기 =================
+  const pastePopup = $('#paste-popup');
+  let pasteAt = null;
+
+  function openPastePopup(sx, sy) {
+    if (!clipboard.length) {
+      toast('복사한 것이 없어요 · 영역 선택 도구로 고른 뒤 복사하세요');
+      return;
+    }
+    pasteAt = toWorld(sx, sy);
+    const list = $('#paste-list');
+    list.innerHTML = '';
+    for (const clip of clipboard) {
+      const item = document.createElement('div');
+      item.className = 'paste-item';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'paste-pick';
+      btn.appendChild(clipThumb(clip));
+      const label = document.createElement('span');
+      label.textContent = `레이어 ${countLeaves(clip.nodes)}개`;
+      btn.appendChild(label);
+      btn.addEventListener('click', () => pasteClip(clip));
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'paste-del';
+      del.title = '목록에서 지우기';
+      del.innerHTML = ICONS.x;
+      del.addEventListener('click', () => {
+        clipboard = clipboard.filter(c => c !== clip);
+        storage.set(CLIP_KEY, clipboard);
+        item.remove();
+        if (!clipboard.length) closePastePopup();
+      });
+      item.append(btn, del);
+      list.appendChild(item);
+    }
+    pastePopup.hidden = false;
+    const pw = pastePopup.offsetWidth, ph = pastePopup.offsetHeight;
+    pastePopup.style.left = clamp(sx - pw / 2, 8, cw - pw - 8) + 'px';
+    pastePopup.style.top = clamp(sy + 16, 8, ch - ph - 8) + 'px';
+  }
+
+  function closePastePopup() {
+    pastePopup.hidden = true;
+  }
+
+  function pasteClip(clip) {
+    const nodes = clip.nodes.map(n => withNewIds(deepCopy(n)));
+    const [x0, y0, x1, y1] = nodesBBox(nodes);
+    const m = Mat.translate(round1(pasteAt[0] - (x0 + x1) / 2), round1(pasteAt[1] - (y0 + y1) / 2));
+    const placed = nodes.map(n => transformNode(n, m));
+    checkpoint();
+    targetList().push(...placed);
+    selection = new Set(placed.map(n => n.id));
+    selBox = computeBox();
+    closePastePopup();
+    strokesChanged();
+  }
+
+  function clipThumb(clip) {
+    const W = 84, H = 64, k = 2;
+    const c = document.createElement('canvas');
+    c.className = 'paste-thumb';
+    c.width = W * k;
+    c.height = H * k;
+    fitAndDraw(c, clip.nodes, 6 * k);
+    return c;
+  }
+
+  // 노드들을 캔버스 크기에 맞춰 그림 (썸네일)
+  function fitAndDraw(c, nodes, pad, frame) {
+    const x = c.getContext('2d');
+    let [x0, y0, x1, y1] = nodesBBox(nodes);
+    if (!isFinite(x0)) return;
+    if (frame) {
+      x0 = Math.min(x0, frame[0]); y0 = Math.min(y0, frame[1]);
+      x1 = Math.max(x1, frame[2]); y1 = Math.max(y1, frame[3]);
+    }
+    const bw = Math.max(1, x1 - x0), bh = Math.max(1, y1 - y0);
+    const scale = Math.min((c.width - pad * 2) / bw, (c.height - pad * 2) / bh);
+    const ox = (c.width - bw * scale) / 2 - x0 * scale;
+    const oy = (c.height - bh * scale) / 2 - y0 * scale;
+    if (frame) {
+      x.fillStyle = PAGE_BG;
+      x.fillRect(0, 0, c.width, c.height);
+      x.fillStyle = '#fff';
+      x.fillRect(ox + frame[0] * scale, oy + frame[1] * scale, (frame[2] - frame[0]) * scale, (frame[3] - frame[1]) * scale);
+    }
+    x.setTransform(scale, 0, 0, scale, ox, oy);
+    // 썸네일이 작아도 선이 보이도록 최소 굵기 보장
+    const minSize = 1.6 / scale;
+    const thicken = list => list.map(n => n.kind === 'group'
+      ? { ...n, children: thicken(n.children) }
+      : (n.size != null && n.size < minSize && n.kind !== 'guide' ? { ...n, size: minSize } : n));
+    drawNodes(x, thicken(nodes), null, 'thumb');
+  }
+
+  // ================= 밑그림 이미지 =================
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/*';
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files && fileInput.files[0];
+    fileInput.value = '';
+    if (file) loadUnderlayImage(file);
+  });
+
+  function loadUnderlayImage(file) {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      // 저장 공간을 아끼려고 긴 변 1600px 로 줄여 JPEG 로 보관
+      const maxSide = 1600;
+      const k = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(img.naturalWidth * k));
+      c.height = Math.max(1, Math.round(img.naturalHeight * k));
+      const x = c.getContext('2d');
+      x.fillStyle = '#fff';
+      x.fillRect(0, 0, c.width, c.height);
+      x.drawImage(img, 0, 0, c.width, c.height);
+      const src = c.toDataURL('image/jpeg', 0.85);
+      // 화면의 80% 크기로 가운데에 배치
+      const [wx0, wy0] = toWorld(0, 0), [wx1, wy1] = toWorld(cw, ch);
+      const fit = Math.min((wx1 - wx0) * 0.8 / c.width, (wy1 - wy0) * 0.8 / c.height);
+      const node = {
+        id: uid(),
+        kind: 'image',
+        name: nextName('밑그림 이미지'),
+        visible: true,
+        src,
+        cx: round1((wx0 + wx1) / 2),
+        cy: round1((wy0 + wy1) / 2),
+        w: round1(c.width * fit),
+        h: round1(c.height * fit),
+        angle: 0,
+      };
+      checkpoint();
+      board.underlays.push(node);
+      selection = new Set([node.id]);
+      selBox = computeBox();
+      strokesChanged();
+      toast('밑그림을 불러왔어요 · 상자를 끌어 옮기고 돌릴 수 있어요');
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); toast('이미지를 열지 못했어요'); };
+    img.src = url;
+  }
+
+  // ================= 실행 취소 (보드별 스냅샷) =================
+  function history() {
+    let h = histories.get(board.id);
+    if (!h) { h = { undo: [], redo: [] }; histories.set(board.id, h); }
+    return h;
+  }
+
+  function snapshot() {
+    return { layers: cloneTree(board.layers), underlays: cloneTree(board.underlays) };
+  }
+
+  function pushUndo(snap) {
+    const h = history();
+    h.undo.push(snap);
+    if (h.undo.length > 200) h.undo.shift();
+    h.redo.length = 0;
+    updateHistoryButtons();
+  }
+
+  function checkpoint() {
+    pushUndo(snapshot());
+  }
+
+  function restore(from, to) {
+    if (active) return;
+    const h = history();
+    const snap = h[from].pop();
+    if (!snap) return;
+    h[to].push(snapshot());
+    board.layers = cloneTree(snap.layers);
+    board.underlays = cloneTree(snap.underlays);
+    selection = normalizeSelection(selection);
+    selBox = computeBox();
+    updateHistoryButtons();
+    strokesChanged();
+  }
+
+  const undo = () => { if (polyDraft || curveDraft) { cancelDraftPoint(); return; } restore('undo', 'redo'); };
+  const redo = () => restore('redo', 'undo');
+
+  // 만드는 중인 도형에서 실행 취소는 마지막 점만 지움
+  function cancelDraftPoint() {
+    if (polyDraft) { polyDraft.pts.pop(); if (!polyDraft.pts.length) polyDraft = null; }
+    else if (curveDraft) { curveDraft.anchors.pop(); if (!curveDraft.anchors.length) curveDraft = null; }
+    buildContextBar();
+    requestRender();
+  }
+
+  function updateHistoryButtons() {
+    const h = history();
+    $('#btn-undo').disabled = h.undo.length === 0 && !polyDraft && !curveDraft;
+    $('#btn-redo').disabled = h.redo.length === 0;
+  }
+
+  $('#btn-undo').addEventListener('click', undo);
+  $('#btn-redo').addEventListener('click', redo);
+
+  function strokesChanged() {
+    if (!selection.size) selBox = null;
+    invalidate();
+    renderLayers();
+    updateSelectionUI();
+    updateHistoryButtons();
+    markChanged();
+  }
+
+  // ================= 레이어 패널 =================
+  const layersPanel = $('#layers');
+  const layerList = $('#layer-list');
+
+  $('#btn-layers').addEventListener('click', () => {
+    layersOpen = !layersOpen;
+    layersPanel.hidden = !layersOpen;
+    $('#btn-layers').setAttribute('aria-pressed', String(layersOpen));
+    renderLayers();
+  });
+
+  function renderLayers() {
+    if (!layersOpen || !board) return;
+    const total = countLeaves(board.layers) + countLeaves(board.underlays);
+    $('#layer-count').textContent = total ? `${total}개` : '';
+    const empty = !board.layers.length && !board.underlays.length;
+    $('#layers-empty').hidden = !empty;
+    $('#layer-hint').hidden = empty;
+    layerList.innerHTML = '';
+    const walk = (list, depth, hiddenParent) => {
+      for (let i = list.length - 1; i >= 0; i--) {
+        const n = list[i];
+        layerList.appendChild(layerRow(n, depth, hiddenParent));
+        if (n.kind === 'group' && expanded.has(n.id)) walk(n.children, depth + 1, hiddenParent || !n.visible);
+      }
+    };
+    walk(board.layers, 0, false);
+    if (board.underlays.length) {
+      const head = document.createElement('li');
+      head.className = 'layer-section';
+      head.textContent = `밑그림 · 투명도 ${Math.round(board.underlayOpacity * 100)}%`;
+      layerList.appendChild(head);
+      walk(board.underlays, 0, false);
+    }
+  }
+
+  function toggleLayerSelection(id) {
+    const next = new Set(selection);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      // 조상이나 자손이 이미 선택돼 있으면 그걸 빼고 이것만
+      const path = pathTo(id);
+      for (const g of path.slice(0, -1)) next.delete(g.id);
+      const node = path[path.length - 1];
+      if (node.kind === 'group') {
+        (function walk(l) { for (const c of l) { next.delete(c.id); if (c.kind === 'group') walk(c.children); } })(node.children);
+      }
+      next.add(id);
+    }
+    setSelection(next);
+  }
+
+  function leafMeta(n) {
+    switch (n.kind) {
+      case 'fill': return '채우기 면';
+      case 'guide': return '가상 선 · 저장 안 됨';
+      case 'blur': return `흐림 · 강도 ${Math.round(n.strength)}`;
+      case 'image': return '이미지';
+      case 'symmetry': {
+        const axes = [n.v != null ? '세로 축' : '', n.h != null ? '가로 축' : ''].filter(Boolean).join('+') || '축 없음';
+        return `자동 대칭 · ${axes}`;
+      }
+      default: return `${(PEN[n.pen] || PEN.basic).label} · ${Math.round(n.size)}px${n.erase ? ' · 지움' : ''}`;
+    }
+  }
+
+  function layerRow(n, depth, hiddenParent) {
+    const li = document.createElement('li');
+    const isGroup = n.kind === 'group';
+    li.className = 'layer' + (isGroup ? ' group' : '') + (selection.has(n.id) ? ' selected' : '') +
+      (n.visible && !hiddenParent ? '' : ' hidden-layer');
+    li.style.paddingLeft = (6 + depth * 18) + 'px';
+
+    const caret = document.createElement('button');
+    caret.type = 'button';
+    caret.className = 'caret' + (expanded.has(n.id) ? ' open' : '');
+    if (isGroup) {
+      caret.innerHTML = ICONS.caret;
+      caret.title = expanded.has(n.id) ? '접기' : '펼치기';
+      caret.addEventListener('click', e => {
+        e.stopPropagation();
+        if (expanded.has(n.id)) expanded.delete(n.id); else expanded.add(n.id);
+        renderLayers();
+      });
+    } else {
+      caret.disabled = true;
+      caret.tabIndex = -1;
+    }
+
+    const info = document.createElement('div');
+    info.className = 'layer-info';
+    const name = document.createElement('div');
+    name.className = 'layer-name';
+    name.textContent = n.name;
+    if (n.id === board.autoGroupId) {
+      const tag = document.createElement('span');
+      tag.className = 'auto-tag';
+      tag.textContent = '자동';
+      name.appendChild(tag);
+    }
+    const meta = document.createElement('div');
+    meta.className = 'layer-meta';
+    if (isGroup) {
+      meta.innerHTML = ICONS.folder;
+      const s = document.createElement('span');
+      s.textContent = `레이어 ${countLeaves(n.children)}개`;
+      meta.appendChild(s);
+    } else {
+      const dot = document.createElement('span');
+      dot.className = 'layer-color';
+      dot.style.background = n.kind === 'guide' ? GUIDE_COLOR : n.kind === 'symmetry' ? SYM_COLOR : n.kind === 'blur' ? 'rgba(80,140,255,.5)' : (n.color || '#ccc');
+      const label = document.createElement('span');
+      label.textContent = leafMeta(n);
+      meta.append(dot, label);
+    }
+    info.append(name, meta);
+
+    const eye = document.createElement('button');
+    eye.type = 'button';
+    eye.className = 'icon-btn';
+    eye.title = n.visible ? '숨기기' : '보이기';
+    eye.innerHTML = n.visible ? ICONS.eye : ICONS.eyeOff;
+    eye.addEventListener('click', e => { e.stopPropagation(); toggleVisibility(n.id); });
+
+    li.append(caret, layerThumb(n), info, eye);
+    li.addEventListener('click', () => toggleLayerSelection(n.id));
+    return li;
+  }
+
+  function layerThumb(n) {
+    let c = n.kind !== 'group' ? thumbCache.get(n) : null;
+    if (c) return c;
+    const W = 48, H = 36, k = 2;
+    c = document.createElement('canvas');
+    c.className = 'layer-thumb';
+    c.width = W * k;
+    c.height = H * k;
+    const frame = board.type === 'main' ? [0, 0, project.width, project.height] : null;
+    fitAndDraw(c, [{ ...n, visible: true }], 3 * k, frame);
+    // 이미지는 아직 불러오는 중일 수 있으니 캐시하지 않음
+    if (n.kind !== 'group' && (n.kind !== 'image' || getImage(n.src))) thumbCache.set(n, c);
+    return c;
+  }
+
+  // ================= 도구 막대 =================
+  const SWATCHES = ['#1b1b1f', '#ffffff', '#e5484d', '#f5a524', '#30a46c', '#0090ff', '#4f5bd5', '#8e4ec6'];
+  const swatchBox = $('#swatches');
+  const contextBar = $('#context-bar');
+  let shiftDown = false;
+
+  for (const color of SWATCHES) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'swatch';
+    b.style.background = color;
+    b.dataset.color = color;
+    b.title = color;
+    b.addEventListener('click', () => { tool.color = color; syncToolUI(false); });
+    swatchBox.appendChild(b);
+  }
+
+  for (const b of document.querySelectorAll('#toolbar .tool')) {
+    b.addEventListener('click', () => setTool(b.dataset.tool));
+  }
+
+  function setTool(t) {
+    if (!TOOLS[t] || active) return;
+    if (t !== tool.current) finishDrafts();
+    tool.current = t;
+    closePopups();
+    syncToolUI();
+    requestRender();
+  }
+
+  $('#color-input').addEventListener('input', e => { tool.color = e.target.value; syncToolUI(false); });
+  $('#size-input').addEventListener('input', e => {
+    const v = Number(e.target.value);
+    const target = sizeTarget();
+    if (target === 'eraser') tool.eraserSize = v;
+    else if (target === 'blur') tool.blurSize = v;
+    else if (target === 'pen') tool.penSizes[tool.pen] = v;
+    syncToolUI(false);
+    requestRender();
+  });
+
+  // 굵기 막대가 조절하는 대상
+  function sizeTarget() {
+    const t = tool.current;
+    if (t === 'eraser') return tool.eraserMode === 'area' ? 'eraser' : null;
+    if (t === 'blur') return 'blur';
+    if (t === 'pen' || t === 'magic' || t === 'shape' || t === 'curve') return 'pen';
+    return null;
+  }
+
+  function currentSize() {
+    const target = sizeTarget();
+    return target === 'eraser' ? tool.eraserSize : target === 'blur' ? tool.blurSize : tool.penSizes[tool.pen];
+  }
+
+  function syncToolUI(rebuildContext = true) {
+    const t = tool.current;
+    for (const b of document.querySelectorAll('#toolbar .tool')) b.classList.toggle('active', b.dataset.tool === t);
+    const colored = ['pen', 'magic', 'shape', 'curve', 'fill'].includes(t);
+    const sized = !!sizeTarget();
+    $('#color-group').hidden = !colored;
+    $('#sep-color').hidden = !colored;
+    $('#size-group').hidden = !sized;
+    $('#sep-size').hidden = !sized;
+    for (const b of swatchBox.children) b.classList.toggle('active', b.dataset.color.toLowerCase() === tool.color.toLowerCase());
+    $('#color-input').value = tool.color;
+    document.documentElement.style.setProperty('--current', colored ? tool.color : '#9a9aa6');
+    if (sized) {
+      const size = currentSize();
+      $('#size-input').value = size;
+      $('#size-value').textContent = size;
+      $('#size-dot').style.setProperty('--dot', clamp(size, 2, 32) + 'px');
+    }
+    stage.dataset.tool = t;
+    if (rebuildContext) buildContextBar();
+    else updatePenPreviews();
+    updateSelectionUI();
+    updateHistoryButtons();
+    storage.set(TOOL_KEY, tool);
+    requestRender();
+  }
+
+  function chip(label, activeNow, onClick, extra) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip' + (activeNow ? ' active' : '');
+    if (extra) b.appendChild(extra);
+    const s = document.createElement('span');
+    s.textContent = label;
+    b.appendChild(s);
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  function actionChip(label, onClick, primary) {
+    const b = chip(label, false, onClick);
+    b.classList.add(primary ? 'chip-primary' : 'chip-action');
+    return b;
+  }
+
+  function hint(text) {
+    const p = document.createElement('span');
+    p.className = 'ctx-hint';
+    p.textContent = text;
+    return p;
+  }
+
+  function sep() {
+    const s = document.createElement('span');
+    s.className = 'ctx-sep';
+    return s;
+  }
+
+  function slider(label, min, max, step, value, onInput, format = v => v) {
+    const wrap = document.createElement('label');
+    wrap.className = 'ctx-slider';
+    const l = document.createElement('span');
+    l.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = min;
+    input.max = max;
+    input.step = step;
+    input.value = value;
+    const out = document.createElement('span');
+    out.className = 'ctx-value';
+    out.textContent = format(value);
+    input.addEventListener('input', () => {
+      const v = Number(input.value);
+      out.textContent = format(v);
+      onInput(v);
+    });
+    wrap.append(l, input, out);
+    return wrap;
+  }
+
+  function penPreview(penId) {
+    const c = document.createElement('canvas');
+    c.className = 'pen-preview';
+    c.dataset.pen = penId;
+    c.width = 88;
+    c.height = 36;
+    drawPenPreview(c);
+    return c;
+  }
+
+  function drawPenPreview(c) {
+    const penId = c.dataset.pen;
+    const x = c.getContext('2d');
+    x.setTransform(1, 0, 0, 1, 0, 0);
+    x.clearRect(0, 0, c.width, c.height);
+    const pts = [], w = [];
+    for (let i = 0; i <= 30; i++) {
+      const t = i / 30;
+      pts.push(8 + t * 72, 18 + Math.sin(t * Math.PI * 2) * 8);
+      w.push(0.35 + 0.65 * Math.sin(t * Math.PI));
+    }
+    const size = Math.min(PEN[penId].size, 12) * (penId === 'pencil' ? 0.8 : 0.7);
+    drawVisible(x, { kind: 'stroke', pen: penId, color: tool.color, size, points: pts, w: penId === 'brush' ? w : undefined });
+  }
+
+  function updatePenPreviews() {
+    for (const c of contextBar.querySelectorAll('.pen-preview')) drawPenPreview(c);
+  }
+
+  function penChips(onPick) {
+    for (const p of PENS) {
+      contextBar.appendChild(chip(p.label, tool.pen === p.id, () => { tool.pen = p.id; onPick(); }, penPreview(p.id)));
+    }
+  }
+
+  function buildContextBar() {
+    contextBar.innerHTML = '';
+    const t = tool.current;
+    const title = document.createElement('span');
+    title.className = 'ctx-title';
+    title.textContent = TOOLS[t];
+    contextBar.appendChild(title);
+    const rebuild = () => syncToolUI();
+
+    if (t === 'pen' || t === 'magic') {
+      penChips(rebuild);
+      if (t === 'magic') contextBar.appendChild(hint('그은 뒤 멈추고 꾹 누르고 있으면 원·타원·직선·곡선 등으로 바뀌어요'));
+    } else if (t === 'eraser') {
+      contextBar.appendChild(chip('레이어 지우개', tool.eraserMode === 'layer', () => { tool.eraserMode = 'layer'; rebuild(); }));
+      contextBar.appendChild(chip('영역 지우개', tool.eraserMode === 'area', () => { tool.eraserMode = 'area'; rebuild(); }));
+      contextBar.appendChild(hint(tool.eraserMode === 'layer'
+        ? '닿은 레이어를 통째로 지워요'
+        : '문지른 부분만 투명하게 지워요 (흰색으로 칠하는 게 아니에요)'));
+    } else if (t === 'select') {
+      contextBar.appendChild(chip('올가미', tool.selectMode === 'lasso', () => { tool.selectMode = 'lasso'; rebuild(); }));
+      contextBar.appendChild(chip('사각형', tool.selectMode === 'rect', () => { tool.selectMode = 'rect'; rebuild(); }));
+      contextBar.appendChild(hint('영역에 걸친 레이어가 잡혀요 · 상자를 끌어 이동, ↻ 로 회전, 모서리로 크기'));
+    } else if (t === 'paste') {
+      contextBar.appendChild(hint('화면을 꾹 누르면 복사한 목록이 나와요'));
+    } else if (t === 'guide') {
+      contextBar.appendChild(chip('직선', tool.guideMode === 'line', () => { tool.guideMode = 'line'; rebuild(); }));
+      contextBar.appendChild(chip('곡선', tool.guideMode === 'free', () => { tool.guideMode = 'free'; rebuild(); }));
+      contextBar.appendChild(hint('채우기가 삐져나가지 않게 막는 선이에요 · 그림과 다운로드엔 안 보여요'));
+    } else if (t === 'fill') {
+      contextBar.appendChild(hint('선으로 둘러싸인 안쪽을 톡 누르면 그 모양대로 새 레이어가 생겨요'));
+    } else if (t === 'shape') {
+      for (const s of SHAPES) {
+        contextBar.appendChild(chip(s.label, tool.shape === s.id, () => { finishDrafts(); tool.shape = s.id; rebuild(); }));
+      }
+      contextBar.appendChild(sep());
+      contextBar.appendChild(chip('채운 도형', tool.shapeFilled, () => { tool.shapeFilled = !tool.shapeFilled; rebuild(); }));
+      contextBar.appendChild(chip('정비율', tool.shapeSquare, () => { tool.shapeSquare = !tool.shapeSquare; rebuild(); }));
+      contextBar.appendChild(slider('인위적 노이즈', 0, 100, 1, tool.noise, v => {
+        tool.noise = v;
+        storage.set(TOOL_KEY, tool);
+        requestRender();
+      }));
+      if (tool.shape === 'polygon') {
+        contextBar.appendChild(sep());
+        if (polyDraft && polyDraft.pts.length) {
+          contextBar.appendChild(actionChip('닫기', () => commitPolygon(true), true));
+          contextBar.appendChild(actionChip('열린 선으로 완료', () => commitPolygon(false)));
+          contextBar.appendChild(actionChip('취소', () => { polyDraft = null; buildContextBar(); requestRender(); }));
+        } else {
+          contextBar.appendChild(hint('톡톡 눌러 꼭짓점을 찍고 첫 점을 누르면 닫혀요'));
+        }
+      }
+    } else if (t === 'curve') {
+      contextBar.appendChild(chip('채운 도형', tool.curveFilled, () => { tool.curveFilled = !tool.curveFilled; rebuild(); }));
+      contextBar.appendChild(sep());
+      if (curveDraft && curveDraft.anchors.length) {
+        contextBar.appendChild(actionChip('닫아서 도형으로', () => commitCurve(true), true));
+        contextBar.appendChild(actionChip('완료', () => commitCurve(false)));
+        contextBar.appendChild(actionChip('취소', () => { curveDraft = null; buildContextBar(); requestRender(); }));
+      } else {
+        contextBar.appendChild(hint('톡 누르면 점, 누른 채 끌면 곡선 · 첫 점을 누르면 닫힌 도형이 돼요'));
+      }
+    } else if (t === 'underlay') {
+      contextBar.appendChild(actionChip('이미지 불러오기', () => fileInput.click(), true));
+      contextBar.appendChild(slider('투명도', 5, 100, 1, Math.round(board ? board.underlayOpacity * 100 : 50), v => {
+        if (!board) return;
+        board.underlayOpacity = v / 100;
+        invalidate();
+        renderLayers();
+        markChanged();
+      }, v => v + '%'));
+      contextBar.appendChild(hint('밑그림을 톡 눌러 선택하면 옮기거나 돌릴 수 있어요 · 다운로드엔 안 나와요'));
+    } else if (t === 'symmetry') {
+      for (const [id, label] of [['rect', '사각형'], ['ellipse', '원'], ['polygon', '다각형']]) {
+        contextBar.appendChild(chip(label, tool.symShape === id, () => { finishDrafts(); tool.symShape = id; rebuild(); }));
+      }
+      contextBar.appendChild(sep());
+      const cur = currentSym();
+      const hasV = cur ? cur.v != null : tool.symV;
+      const hasH = cur ? cur.h != null : tool.symH;
+      contextBar.appendChild(chip('세로 축', hasV, () => toggleSymAxis('v')));
+      contextBar.appendChild(chip('가로 축', hasH, () => toggleSymAxis('h')));
+      contextBar.appendChild(sep());
+      if (polyDraft && polyDraft.pts.length) {
+        contextBar.appendChild(actionChip('닫기', () => commitPolygon(true), true));
+        contextBar.appendChild(actionChip('취소', () => { polyDraft = null; buildContextBar(); requestRender(); }));
+      } else if (cur) {
+        contextBar.appendChild(hint(`'${cur.name}' 편집 중 · 축 손잡이를 끌어 옮겨요 · 빈 곳을 끌면 새 영역`));
+      } else {
+        contextBar.appendChild(hint('영역을 그리면 이 레이어 위에 그린 것 중 영역 안의 것이 축으로 반전돼요 · 기존 영역은 톡 눌러 편집'));
+      }
+    } else if (t === 'blur') {
+      contextBar.appendChild(slider('강도', 1, 40, 1, tool.blurStrength, v => { tool.blurStrength = v; storage.set(TOOL_KEY, tool); }));
+      contextBar.appendChild(hint('칠한 영역 아래에 있는 그림이 흐려져요'));
+    }
+  }
+
+  // ================= 이미지 다운로드 =================
+  const downloadMenu = $('#download-menu');
+  $('#btn-download').addEventListener('click', e => {
+    e.stopPropagation();
+    downloadMenu.hidden = !downloadMenu.hidden;
+  });
+  for (const b of downloadMenu.querySelectorAll('[data-bg]')) {
+    b.addEventListener('click', () => { downloadMenu.hidden = true; exportPNG(b.dataset.bg === 'transparent'); });
+  }
+  document.addEventListener('pointerdown', e => {
+    if (!downloadMenu.hidden && !e.target.closest('.menu-wrap')) downloadMenu.hidden = true;
+    if (!pastePopup.hidden && !e.target.closest('#paste-popup') && e.target !== canvas) closePastePopup();
+  });
+
+  function closePopups() {
+    downloadMenu.hidden = true;
+    closePastePopup();
+  }
+
+  // 기본 캔버스 영역 안에 그려진 부분만 저장 (밖으로 나간 선은 잘림, 밑그림·가상 선 제외)
+  function exportPNG(transparent) {
+    if (!project) return;
+    const main = project.boards[0];
+    const c = document.createElement('canvas');
+    c.width = project.width;
+    c.height = project.height;
+    const x = c.getContext('2d');
+    if (!transparent) {
+      x.fillStyle = '#fff';
+      x.fillRect(0, 0, c.width, c.height);
+    }
+    drawNodes(x, main.layers, null, 'export');
+    const fileName = (project.name.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'drawing') + '.png';
+    c.toBlob(blob => {
+      if (!blob) { toast('이미지를 만들지 못했어요'); return; }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      toast(`${fileName} 저장됨 (${project.width} × ${project.height}${transparent ? ', 투명 배경' : ''})`);
+    }, 'image/png');
+  }
+
+  // ================= 키보드 =================
+  const HOTKEYS = { p: 'pen', m: 'magic', r: 'shape', c: 'curve', l: 'guide', f: 'fill', e: 'eraser', b: 'blur', s: 'select', v: 'paste', u: 'underlay', y: 'symmetry' };
+
+  window.addEventListener('keydown', e => {
+    if (e.key === 'Shift') shiftDown = true;
+    if (!project || editor.hidden) return;
+    if (e.target instanceof HTMLInputElement && e.target.type !== 'range') return;
+    const mod = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+    if (mod && key === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+    else if (mod && key === 'y') { e.preventDefault(); redo(); }
+    else if (mod && key === 'c') { e.preventDefault(); copySelection(); }
+    else if (mod && key === 'g') { e.preventDefault(); e.shiftKey ? ungroupSelection() : groupSelection(); }
+    else if (mod && key === 'v') {
+      e.preventDefault();
+      if (clipboard.length) { pasteAt = toWorld(cw / 2, ch / 2); pasteClip(clipboard[0]); }
+    }
+    else if (mod) return;
+    else if (e.code === 'Space' && !e.repeat) { spaceDown = true; stage.classList.add('panning'); e.preventDefault(); }
+    else if (key === 'enter') {
+      if (polyDraft) commitPolygon(true);
+      else if (curveDraft) commitCurve(false);
+    }
+    else if (key === 'escape') {
+      closePopups();
+      if (polyDraft || curveDraft) { polyDraft = null; curveDraft = null; buildContextBar(); requestRender(); }
+      else if (selection.size) setSelection([]);
+    }
+    else if ((key === 'delete' || key === 'backspace') && selection.size) { e.preventDefault(); deleteSelection(); }
+    else if (!e.repeat && HOTKEYS[key]) setTool(HOTKEYS[key]);
+  });
+  window.addEventListener('keyup', e => {
+    if (e.key === 'Shift') shiftDown = false;
+    if (e.code === 'Space') { spaceDown = false; stage.classList.remove('panning'); }
+  });
+
+  // ================= 토스트 =================
+  let toastTimer = 0;
+  function toast(msg, ms = 2400) {
+    const t = $('#toast');
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.hidden = true; }, ms);
+  }
+
+  // ================= 시작 =================
+  // 화면에 버전을 보여 줘서 태블릿이 최신 코드를 받았는지 확인할 수 있게 함
+  // (고칠 때마다 index.html 의 ?v= 값과 함께 올림)
+  const APP_VERSION = '2026.10.01c';
+  $('#app-version').textContent = 'v' + APP_VERSION;
+  showScreen('home');
+  renderHome();
+})();
