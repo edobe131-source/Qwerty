@@ -89,6 +89,7 @@
     select: '영역 선택',
     paste: '붙여넣기',
     underlay: '밑그림',
+    symmetry: '자동 대칭',
   };
 
   const SHAPES = [
@@ -275,7 +276,7 @@
   });
 
   function newBoard(id, type, name) {
-    return { id, type, name, layers: [], underlays: [], underlayOpacity: 0.5, counters: {}, nextNum: 1, nextGroup: 1, view: null };
+    return { id, type, name, layers: [], underlays: [], underlayOpacity: 0.5, counters: {}, nextNum: 1, nextGroup: 1, autoGroupId: null, view: null };
   }
 
   // 예전 형식 프로젝트를 지금 형식으로 바꿈
@@ -289,6 +290,7 @@
       if (!b.underlays) b.underlays = [];
       if (b.underlayOpacity == null) b.underlayOpacity = 0.5;
       if (!b.counters) b.counters = {};
+      if (b.autoGroupId === undefined) b.autoGroupId = null;
     }
     p.version = 3;
     return p;
@@ -309,6 +311,7 @@
   const AUX_BG = '#f7f7f4';
   const ACCENT = '#4f5bd5';
   const GUIDE_COLOR = '#12a3c9';
+  const SYM_COLOR = '#8e4ec6';
   const MIN_ZOOM = 0.02;
   const MAX_ZOOM = 40;
 
@@ -329,6 +332,9 @@
     curveFilled: false,
     blurSize: 40,
     blurStrength: 8,
+    symShape: 'rect',
+    symH: false,
+    symV: true,
     ...savedTool,
     penSizes: { ...penDefaults, ...(savedTool.penSizes || {}) },
   };
@@ -464,7 +470,7 @@
         if (ids.has(n.id)) { list.splice(i, 1); continue; }
         if (n.kind === 'group') {
           prune(n.children);
-          if (!n.children.length) list.splice(i, 1);
+          if (!n.children.length && n.id !== board.autoGroupId) list.splice(i, 1);
         }
       }
     };
@@ -524,6 +530,7 @@
   function areaPolys(n) {
     if (n.kind === 'fill') return n.paths;
     if (n.kind === 'image') return [imageCorners(n)];
+    if (n.kind === 'symmetry') return [n.region];
     return null;
   }
 
@@ -627,6 +634,17 @@
       return [co, si, -si, co, cx - co * cx + si * cy, cy - si * cx - co * cy];
     },
     scaleAbout: (k, cx, cy) => [k, 0, 0, k, cx - k * cx, cy - k * cy],
+    // 점 (cx, cy) 를 지나고 각도 phi 인 직선에 대한 반사
+    reflectAbout(phi, cx, cy) {
+      const a = Math.cos(2 * phi), b = Math.sin(2 * phi);
+      return [a, b, b, -a, cx - a * cx - b * cy, cy - b * cx + a * cy];
+    },
+    // A ∘ B (B 를 먼저 적용)
+    multiply: (A, B) => [
+      A[0] * B[0] + A[2] * B[1], A[1] * B[0] + A[3] * B[1],
+      A[0] * B[2] + A[2] * B[3], A[1] * B[2] + A[3] * B[3],
+      A[0] * B[4] + A[2] * B[5] + A[4], A[1] * B[4] + A[3] * B[5] + A[5],
+    ],
     apply: (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]],
   };
 
@@ -639,16 +657,36 @@
     return out;
   }
 
+  // 각도 a 방향이 행렬 m 을 거친 뒤의 각도
+  function mapAngle(m, a) {
+    return Math.atan2(m[1] * Math.cos(a) + m[3] * Math.sin(a), m[0] * Math.cos(a) + m[2] * Math.sin(a));
+  }
+
   function transformNode(n, m) {
     const k = Math.hypot(m[0], m[1]);
-    const rot = Math.atan2(m[1], m[0]);
+    const mirrored = m[0] * m[3] - m[1] * m[2] < 0; // 반전 포함
     if (n.kind === 'group') {
       n.children = n.children.map(c => transformNode(c, m));
       return n;
     }
     if (n.kind === 'image') {
       const [cx, cy] = Mat.apply(m, n.cx, n.cy);
-      return { ...n, cx: round1(cx), cy: round1(cy), w: round1(n.w * k), h: round1(n.h * k), angle: round2((n.angle || 0) + rot) };
+      let angle = mapAngle(m, n.angle || 0);
+      let flip = !!n.flip;
+      if (mirrored) { angle += Math.PI; flip = !flip; }
+      return { ...n, cx: round1(cx), cy: round1(cy), w: round1(n.w * k), h: round1(n.h * k), angle: round2(angle), flip };
+    }
+    if (n.kind === 'symmetry') {
+      const [cx, cy] = Mat.apply(m, n.cx, n.cy);
+      return {
+        ...n,
+        region: transformPoints(n.region, m),
+        cx: round1(cx),
+        cy: round1(cy),
+        angle: round2(mapAngle(m, n.angle || 0)),
+        v: n.v == null ? null : round1(n.v * k),
+        h: n.h == null ? null : round1(n.h * k * (mirrored ? -1 : 1)),
+      };
     }
     const s = { ...n };
     if (n.points) s.points = transformPoints(n.points, m);
@@ -656,7 +694,7 @@
     if (n.size != null) s.size = round2(n.size * k);
     if (n.strength != null) s.strength = round2(n.strength * k);
     if (n.erase) s.erase = n.erase.map(e => ({ size: round2(e.size * k), points: transformPoints(e.points, m) }));
-    if (n.pen === 'calligraphy') s.nib = round2((n.nib ?? NIB_ANGLE) + rot);
+    if (n.pen === 'calligraphy') s.nib = round2(mapAngle(m, n.nib ?? NIB_ANGLE));
     return s;
   }
 
@@ -749,6 +787,7 @@
     board = b;
     selection = new Set();
     selBox = null;
+    symEditId = null;
     if (!board.view) board.view = defaultView(board);
     cacheDirty = true;
     renderTabs();
@@ -756,7 +795,8 @@
     updateHistoryButtons();
     updateSelectionUI();
     updateZoomLabel();
-    if (tool.current === 'underlay') buildContextBar();
+    updateAutoGroupUI();
+    if (tool.current === 'underlay' || tool.current === 'symmetry') buildContextBar();
     $('#board-badge').textContent = board.type === 'main'
       ? `기본 캔버스 · ${project.width} × ${project.height}`
       : '보조 캔버스 · 무한';
@@ -893,6 +933,7 @@
       c.save();
       c.translate(n.cx, n.cy);
       c.rotate(n.angle || 0);
+      if (n.flip) c.scale(-1, 1);
       c.drawImage(img, -n.w / 2, -n.h / 2, n.w, n.h);
       c.restore();
       return;
@@ -1125,22 +1166,146 @@
     c.restore();
   }
 
-  // mode: 'editor' 작업 화면 / 'export' 저장 이미지 / 'thumb' 레이어 미리보기
+  // ----- 자동 대칭 -----
+  // 대칭 레이어보다 위(나중)에 그려지는 레이어 중 대칭 영역 안의 부분이 축을 기준으로 반전돼서 함께 그려진다
+  function symAxes(n) {
+    const a = n.angle || 0, co = Math.cos(a), si = Math.sin(a);
+    const out = [];
+    // 세로 축: 가로로 움직임 / 가로 축: 세로로 움직임
+    if (n.v != null) out.push({ which: 'v', x: n.cx + n.v * co, y: n.cy + n.v * si, dir: a + Math.PI / 2 });
+    if (n.h != null) out.push({ which: 'h', x: n.cx - n.h * si, y: n.cy + n.h * co, dir: a });
+    return out;
+  }
+
+  function symMatrices(n) {
+    const ms = symAxes(n).map(ax => Mat.reflectAbout(ax.dir, ax.x, ax.y));
+    if (ms.length === 2) ms.push(Mat.multiply(ms[0], ms[1]));
+    return ms;
+  }
+
+  function drawSymmetry(c, n, mode) {
+    if (mode === 'export' || mode === 'walls') return;
+    const t = c.getTransform();
+    const sc = Math.hypot(t.a, t.b) || 1;
+    const px = (mode === 'editor' ? dpr : 1) / sc;
+    const b = leafBBox(n);
+    const len = Math.hypot(b[2] - b[0], b[3] - b[1]) + 10;
+    c.save();
+    c.beginPath();
+    tracePolys(c, [n.region]);
+    c.fillStyle = 'rgba(142, 78, 198, .05)';
+    c.fill();
+    c.strokeStyle = SYM_COLOR;
+    c.lineWidth = 1.4 * px;
+    c.setLineDash([6 * px, 4 * px]);
+    c.stroke();
+    c.setLineDash([]);
+    c.clip();
+    c.lineWidth = 2 * px;
+    for (const ax of symAxes(n)) {
+      const dx = Math.cos(ax.dir) * len, dy = Math.sin(ax.dir) * len;
+      c.beginPath();
+      c.moveTo(ax.x - dx, ax.y - dy);
+      c.lineTo(ax.x + dx, ax.y + dy);
+      c.stroke();
+    }
+    c.restore();
+  }
+
+  // 반전된 사본 그리기: 기준 변환(base) 기준으로 R ∘ (현재 변환)
+  function drawMirrors(c, n, extraErase, mode, sc) {
+    const T = c.getTransform();
+    const M = sc.base.inverse().multiply(T);
+    const b = leafBBox(n);
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const [x, y] of [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]]) {
+      const X = M.a * x + M.c * y + M.e, Y = M.b * x + M.d * y + M.f;
+      x0 = Math.min(x0, X); y0 = Math.min(y0, Y); x1 = Math.max(x1, X); y1 = Math.max(y1, Y);
+    }
+    for (const sym of sc.syms) {
+      const rb = leafBBox(sym);
+      if (x1 < rb[0] || x0 > rb[2] || y1 < rb[1] || y0 > rb[3]) continue;
+      for (const R of symMatrices(sym)) {
+        const BR = sc.base.multiply(new DOMMatrix(R));
+        c.save();
+        c.setTransform(BR);
+        c.beginPath();
+        tracePolys(c, [sym.region]);
+        c.clip();
+        c.setTransform(BR.multiply(M));
+        drawLeaf(c, n, extraErase, mode);
+        c.restore();
+      }
+    }
+  }
+
+  const MIRRORABLE = new Set(['stroke', 'fill', 'image', 'guide']);
+
+  // 지금 보이는 대칭 레이어들 (그리는 중인 새 레이어는 맨 위에 올라가므로 전부 적용)
+  function collectSyms() {
+    const out = [];
+    const walk = list => {
+      for (const n of list) {
+        if (!n.visible) continue;
+        if (n.kind === 'group') walk(n.children);
+        else if (n.kind === 'symmetry') out.push(n);
+      }
+    };
+    walk(board.layers);
+    return out;
+  }
+
+  // 그리는 중인 레이어 미리보기 (대칭 사본 포함)
+  function drawPreview(c, node) {
+    applyView(c);
+    drawLeaf(c, node, null, 'editor');
+    if (!MIRRORABLE.has(node.kind)) return;
+    const syms = collectSyms();
+    if (syms.length) drawMirrors(c, node, null, 'editor', { syms, base: c.getTransform() });
+  }
+
+  // mode: 'editor' 작업 화면 / 'export' 저장 이미지 / 'thumb' 레이어 미리보기 / 'walls' 채우기 경계
   function drawLeaf(c, n, extraErase, mode) {
+    if (mode === 'walls') {
+      if (n.kind === 'guide') {
+        const t = c.getTransform();
+        c.save();
+        c.strokeStyle = '#000';
+        c.lineWidth = 1.8 / (Math.hypot(t.a, t.b) || 1);
+        c.lineCap = 'round';
+        c.lineJoin = 'round';
+        c.beginPath();
+        tracePath(c, n.points);
+        c.stroke();
+        c.restore();
+      } else if (n.kind === 'stroke') {
+        // 반투명 펜도 빈틈 없는 벽으로
+        drawVisible(c, ['pencil', 'marker', 'highlighter'].includes(n.pen) ? { ...n, pen: 'basic' } : n, extraErase);
+      }
+      return;
+    }
     if (n.kind === 'guide') drawGuide(c, n, mode);
+    else if (n.kind === 'symmetry') drawSymmetry(c, n, mode);
     else if (n.kind === 'blur') { if (mode === 'thumb') drawBlurMask(c, n); else applyBlur(c, n); }
     else drawVisible(c, n, extraErase);
   }
 
   // 레이어 트리 그리기 (뒤 → 앞)
-  function drawNodes(c, nodes, lv, mode) {
+  function drawNodes(c, nodes, lv, mode, sc) {
+    if (!sc) sc = { syms: [], base: c.getTransform() };
     for (const n of nodes) {
       if (!n.visible) continue;
       if (lv && lv.hidden.has(n.id)) continue;
       const m = lv && lv.transform && lv.transform.ids.has(n.id) ? lv.transform.m : null;
       if (m) { c.save(); c.transform(...m); }
-      if (n.kind === 'group') drawNodes(c, n.children, lv, mode);
-      else drawLeaf(c, n, lv && lv.erase && lv.erase.strokes.has(n.id) ? lv.erase.path : null, mode);
+      if (n.kind === 'group') {
+        drawNodes(c, n.children, lv, mode, sc);
+      } else {
+        const er = lv && lv.erase && lv.erase.strokes.has(n.id) ? lv.erase.path : null;
+        drawLeaf(c, n, er, mode);
+        if (n.kind === 'symmetry') sc.syms.push(m ? transformNode({ ...n }, m) : n);
+        else if (sc.syms.length && MIRRORABLE.has(n.kind)) drawMirrors(c, n, er, mode, sc);
+      }
       if (m) c.restore();
     }
   }
@@ -1280,18 +1445,14 @@
     const v = board.view;
 
     // 그리는 중인 레이어 미리보기
-    if (active && active.preview) {
-      applyView(c);
-      drawLeaf(c, active.preview, null, 'editor');
-    }
+    if (active && active.preview) drawPreview(c, active.preview);
 
     // 다각형 만드는 중
     if (polyDraft && polyDraft.pts.length) {
       const pts = polyDraft.pts;
       const hv = hover && !(active && active.kind === 'polypt') ? toWorld(...hover) : null;
       const node = draftPolygonNode(hv);
-      applyView(c);
-      if (node) drawLeaf(c, node, null, 'editor');
+      if (node) drawPreview(c, node);
       c.setTransform(dpr, 0, 0, dpr, 0, 0);
       c.save();
       c.strokeStyle = ACCENT;
@@ -1308,8 +1469,7 @@
       const A = curveDraft.anchors;
       const hv = hover && !active ? toWorld(...hover) : null;
       const node = draftCurveNode(false, hv);
-      applyView(c);
-      if (node) drawLeaf(c, node, null, 'editor');
+      if (node) drawPreview(c, node);
       c.setTransform(dpr, 0, 0, dpr, 0, 0);
       c.save();
       c.strokeStyle = ACCENT;
@@ -1334,6 +1494,38 @@
         c.stroke();
         c.restore();
       });
+      c.restore();
+    }
+
+    // 자동 대칭: 고른 대칭의 축 손잡이
+    const sym = tool.current === 'symmetry' ? currentSym() : null;
+    if (sym) {
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.save();
+      c.strokeStyle = '#fff';
+      c.lineWidth = 2;
+      for (const ax of symAxes(sym)) {
+        const [x, y] = toScreen(ax.x, ax.y);
+        c.beginPath();
+        c.arc(x, y, 9, 0, Math.PI * 2);
+        c.fillStyle = SYM_COLOR;
+        c.fill();
+        c.stroke();
+        // 움직일 수 있는 방향 표시
+        const d = ax.dir + Math.PI / 2, ux = Math.cos(d) * 4, uy = Math.sin(d) * 4;
+        c.beginPath();
+        c.moveTo(x - ux, y - uy);
+        c.lineTo(x + ux, y + uy);
+        c.stroke();
+      }
+      const pts = [];
+      for (let i = 0; i < sym.region.length; i += 2) pts.push(toScreen(sym.region[i], sym.region[i + 1]));
+      c.strokeStyle = SYM_COLOR;
+      c.lineWidth = 2;
+      c.beginPath();
+      pts.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y)));
+      c.closePath();
+      c.stroke();
       c.restore();
     }
 
@@ -1518,6 +1710,7 @@
       case 'shape': tool.shape === 'polygon' ? polygonDown(e, x, y) : startShape(e, x, y); break;
       case 'curve': curveDown(e, x, y); break;
       case 'blur': startBlur(e, x, y); break;
+      case 'symmetry': symmetryDown(e, x, y); break;
     }
   }
 
@@ -1562,6 +1755,8 @@
       case 'lasso': lassoTo(x, y); break;
       case 'transform': updateTransform(x, y); break;
       case 'press': pressMove(x, y); break;
+      case 'symregion': symRegionTo(x, y); break;
+      case 'symaxis': symAxisTo(x, y); break;
     }
   });
 
@@ -1601,6 +1796,8 @@
       case 'lasso': finishLasso(); break;
       case 'transform': finishTransform(); break;
       case 'press': finishPress(); break;
+      case 'symregion': finishSymRegion(); break;
+      case 'symaxis': strokesChanged(); break;
     }
     if (active === a) active = null;
     requestRender();
@@ -1647,11 +1844,69 @@
     viewChanged();
   }
 
+  // 새 레이어가 들어갈 목록 (자동 그룹이 켜져 있으면 그 그룹 안)
+  function targetList() {
+    const g = autoGroup();
+    return g ? g.children : board.layers;
+  }
+
   function addLayer(node) {
     checkpoint();
-    board.layers.push(node);
+    targetList().push(node);
     strokesChanged();
   }
+
+  // ================= 자동 그룹 =================
+  function autoGroup() {
+    if (!board || !board.autoGroupId) return null;
+    const loc = locateIn(board.autoGroupId, board.layers, null);
+    if (!loc || loc.node.kind !== 'group') {
+      board.autoGroupId = null;
+      updateAutoGroupUI();
+      return null;
+    }
+    return loc.node;
+  }
+
+  function toggleAutoGroup() {
+    if (!board || active) return;
+    if (autoGroup()) {
+      board.autoGroupId = null;
+      markChanged();
+      updateAutoGroupUI();
+      renderLayers();
+      toast('자동 그룹을 껐어요');
+      return;
+    }
+    // 선택한 그룹이 있으면 그 그룹으로, 없으면 새 그룹을 만들어 자동 선택
+    const sel = selectedNodes();
+    let g = sel.length === 1 && sel[0].kind === 'group' && !isUnderlay(sel[0].id) ? sel[0] : null;
+    if (!g) {
+      checkpoint();
+      g = { id: uid(), kind: 'group', name: '그룹 ' + board.nextGroup++, visible: true, children: [] };
+      board.layers.push(g);
+    }
+    board.autoGroupId = g.id;
+    expanded.add(g.id);
+    selection = new Set([g.id]);
+    selBox = computeBox();
+    strokesChanged();
+    updateAutoGroupUI();
+    toast(`이제 새 레이어는 '${g.name}'에 들어가요`);
+  }
+
+  function updateAutoGroupUI() {
+    const g = board && board.autoGroupId ? locateIn(board.autoGroupId, board.layers, null)?.node : null;
+    const btn = $('#btn-autogroup');
+    btn.setAttribute('aria-pressed', String(!!g));
+    btn.title = g ? '자동 그룹 끄기' : '자동 그룹 켜기 (선택한 그룹, 없으면 새 그룹)';
+    const badge = $('#auto-badge');
+    badge.hidden = !g;
+    if (g) badge.textContent = `자동 그룹 · ${g.name}`;
+  }
+
+  $('#btn-autogroup').addEventListener('click', toggleAutoGroup);
+  $('#auto-badge').addEventListener('click', toggleAutoGroup);
 
   // 현재 펜 설정으로 선 레이어 만들기
   function penStroke(points, namePrefix) {
@@ -1830,7 +2085,7 @@
   // 다각형: 톡톡 눌러 꼭짓점 → 첫 점을 누르면 닫힘
   function polygonDown(e, x, y) {
     const [wx, wy] = toWorld(x, y);
-    if (!polyDraft) polyDraft = { pts: [], seed: (Math.random() * 1e9) | 0 };
+    if (!polyDraft) polyDraft = { pts: [], seed: (Math.random() * 1e9) | 0, purpose: tool.current === 'symmetry' ? 'symmetry' : 'shape' };
     const pts = polyDraft.pts;
     if (pts.length >= 3) {
       const [fx, fy] = toScreen(pts[0].x, pts[0].y);
@@ -1852,13 +2107,16 @@
   function draftPolygonNode(extra, closed = false) {
     const pts = extra ? [...polyDraft.pts, { x: extra[0], y: extra[1] }] : polyDraft.pts;
     if (pts.length < 2) return null;
+    if (polyDraft.purpose === 'symmetry') return makeSymmetry(window.Shapes.toFlat(pts), 'polygon', true);
     return shapeNodeFrom(pts, closed, polyDraft.seed, closed && tool.shapeFilled, tool.noise);
   }
 
   function commitPolygon(closed) {
     const d = polyDraft;
     polyDraft = null;
-    if (d && d.pts.length >= (closed ? 3 : 2)) {
+    if (d && d.purpose === 'symmetry') {
+      if (d.pts.length >= 3) addSymmetry(makeSymmetry(window.Shapes.toFlat(d.pts), 'polygon'));
+    } else if (d && d.pts.length >= (closed ? 3 : 2)) {
       const n = shapeNodeFrom(d.pts, closed, d.seed, closed && tool.shapeFilled, tool.noise, '다각형');
       addLayer(n);
     }
@@ -1923,8 +2181,143 @@
 
   // 다른 도구로 가거나 캔버스를 바꿀 때 만들던 도형을 열린 선으로 마무리
   function finishDrafts() {
-    if (polyDraft) commitPolygon(false);
+    if (polyDraft) commitPolygon(polyDraft.purpose === 'symmetry');
     if (curveDraft) commitCurve(false);
+  }
+
+  // ================= 자동 대칭 =================
+  let symEditId = null;
+
+  function currentSym() {
+    if (!symEditId || !board) return null;
+    const n = locate(symEditId)?.node;
+    return n && n.kind === 'symmetry' ? n : null;
+  }
+
+  function makeSymmetry(region, shape, preview) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < region.length; i += 2) {
+      x0 = Math.min(x0, region[i]); x1 = Math.max(x1, region[i]);
+      y0 = Math.min(y0, region[i + 1]); y1 = Math.max(y1, region[i + 1]);
+    }
+    const n = {
+      id: uid(),
+      kind: 'symmetry',
+      name: preview ? '' : nextName('자동 대칭'),
+      visible: true,
+      shape,
+      region,
+      cx: round1((x0 + x1) / 2),
+      cy: round1((y0 + y1) / 2),
+      angle: 0,
+      v: tool.symV ? 0 : null,
+      h: tool.symH ? 0 : null,
+    };
+    if (n.v == null && n.h == null) n.v = 0;
+    return n;
+  }
+
+  function addSymmetry(n) {
+    symEditId = n.id;
+    addLayer(n);
+    buildContextBar();
+    toast('축 손잡이를 끌어 옮길 수 있어요 · 이 레이어 위에 그린 것이 반전돼요', 3000);
+  }
+
+  // 축 위를 눌렀는지 (화면 좌표)
+  function hitSymAxis(n, x, y) {
+    const b = leafBBox(n);
+    const [bx0, by0] = toScreen(b[0], b[1]), [bx1, by1] = toScreen(b[2], b[3]);
+    if (x < bx0 - 24 || x > bx1 + 24 || y < by0 - 24 || y > by1 + 24) return null;
+    let best = null, bd = 16;
+    for (const ax of symAxes(n)) {
+      const [px, py] = toScreen(ax.x, ax.y);
+      const dx = Math.cos(ax.dir), dy = Math.sin(ax.dir);
+      const d = Math.abs((x - px) * dy - (y - py) * dx);
+      if (d < bd) { bd = d; best = ax.which; }
+    }
+    return best;
+  }
+
+  function symAt(wx, wy) {
+    const syms = collectSyms();
+    for (let i = syms.length - 1; i >= 0; i--) {
+      if (pointInPoly(wx, wy, syms[i].region)) return syms[i];
+    }
+    return null;
+  }
+
+  function symmetryDown(e, x, y) {
+    const cur = currentSym();
+    const which = cur && hitSymAxis(cur, x, y);
+    if (which) {
+      checkpoint();
+      const copy = { ...cur };
+      replaceNode(cur.id, () => copy);
+      active = { kind: 'symaxis', id: e.pointerId, type: e.pointerType, node: copy, which };
+      return;
+    }
+    if (tool.symShape === 'polygon') { polygonDown(e, x, y); return; }
+    const [wx, wy] = toWorld(x, y);
+    active = { kind: 'symregion', id: e.pointerId, type: e.pointerType, a: { x: wx, y: wy }, b: { x: wx, y: wy }, sx: x, sy: y, moved: false, preview: null };
+  }
+
+  function symAxisTo(x, y) {
+    const n = active.node;
+    const [wx, wy] = toWorld(x, y);
+    const a = n.angle || 0, co = Math.cos(a), si = Math.sin(a);
+    const dx = wx - n.cx, dy = wy - n.cy;
+    let off = active.which === 'v' ? dx * co + dy * si : -dx * si + dy * co;
+    // 가운데 근처면 가운데에 붙임
+    if (Math.abs(off) * board.view.s < 8) off = 0;
+    n[active.which] = round1(off);
+    invalidate();
+  }
+
+  function symRegionGeometry(a, b) {
+    if (tool.symShape === 'ellipse') {
+      return window.Shapes.toFlat(window.Shapes.generate('ellipse', a, b).pts);
+    }
+    const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x), y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
+    return [x0, y0, x1, y0, x1, y1, x0, y1].map(round1);
+  }
+
+  function symRegionTo(x, y) {
+    const a = active;
+    a.b = { x: toWorld(x, y)[0], y: toWorld(x, y)[1] };
+    if (Math.hypot(x - a.sx, y - a.sy) > 6) a.moved = true;
+    if (!a.moved) return;
+    a.preview = makeSymmetry(symRegionGeometry(a.a, a.b), tool.symShape, true);
+    requestRender();
+  }
+
+  function finishSymRegion() {
+    const a = active;
+    if (!a.moved) {
+      // 톡: 그 자리의 대칭을 골라 편집
+      const n = symAt(a.a.x, a.a.y);
+      symEditId = n ? n.id : null;
+      buildContextBar();
+      requestRender();
+      return;
+    }
+    const n = makeSymmetry(symRegionGeometry(a.a, a.b), tool.symShape);
+    active = null;
+    addSymmetry(n);
+  }
+
+  // 축 켜고 끄기: 고른 대칭이 있으면 그 대칭에, 없으면 새로 만들 대칭의 기본값
+  function toggleSymAxis(which) {
+    const key = which === 'v' ? 'symV' : 'symH';
+    const cur = currentSym();
+    if (cur) {
+      checkpoint();
+      replaceNode(cur.id, n => ({ ...n, [which]: n[which] == null ? 0 : null }));
+      strokesChanged();
+    } else {
+      tool[key] = !tool[key];
+    }
+    syncToolUI();
   }
 
   // ================= 흐림 =================
@@ -1969,23 +2362,8 @@
     const x = c.getContext('2d', { willReadFrequently: true });
     x.setTransform(k, 0, 0, k, -wx0 * k, -wy0 * k);
 
-    // 경계 그리기 (반투명 펜도 빈틈 없는 벽으로)
-    for (const n of allLeaves(true)) {
-      if (n.kind === 'guide') {
-        x.save();
-        x.strokeStyle = '#000';
-        x.lineWidth = Math.max(1.8 / k, 1);
-        x.lineCap = 'round';
-        x.lineJoin = 'round';
-        x.beginPath();
-        tracePath(x, n.points);
-        x.stroke();
-        x.restore();
-      } else if (n.kind === 'stroke') {
-        const solid = ['pencil', 'marker', 'highlighter'].includes(n.pen) ? { ...n, pen: 'basic' } : n;
-        drawVisible(x, solid);
-      }
-    }
+    // 경계 그리기: 선과 가상 선 (자동 대칭으로 반전된 사본 포함)
+    drawNodes(x, board.layers, null, 'walls');
     const inPage = board.type === 'main' && px >= 0 && py >= 0 && px <= project.width && py <= project.height;
     if (inPage) {
       x.strokeStyle = '#000';
@@ -2013,8 +2391,18 @@
     checkpoint();
     // 채우기 면은 선보다 뒤에: 기존 채우기 면들 바로 위에 넣음
     let at = 0;
-    board.layers.forEach((n, i) => { if (n.kind === 'fill') at = i + 1; });
-    board.layers.splice(at, 0, node);
+    const list = targetList();
+    // 기존 채우기 면 위, 그리고 이 영역에 걸친 자동 대칭 레이어 위 (그래야 함께 반전됨)
+    const fb = leafBBox(node);
+    list.forEach((n, i) => {
+      if (n.kind === 'fill') at = i + 1;
+      if (leavesOf(n).some(l => {
+        if (l.kind !== 'symmetry') return false;
+        const rb = leafBBox(l);
+        return !(fb[2] < rb[0] || fb[0] > rb[2] || fb[3] < rb[1] || fb[1] > rb[3]);
+      })) at = i + 1;
+    });
+    list.splice(at, 0, node);
     strokesChanged();
   }
 
@@ -2064,12 +2452,8 @@
       const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / r));
       for (let s = 0; s <= steps; s++) {
         const x = ax + (bx - ax) * s / steps, y = ay + (by - ay) * s / steps;
-        for (let i = leaves.length - 1; i >= 0; i--) {
-          const n = leaves[i];
-          if (!leafNearSegment(n, x, y, x, y, r)) continue;
-          if (!a.hits.has(n.id)) { a.hits.add(n.id); changed = true; }
-          break;
-        }
+        const hit = topLeafAt(leaves, x, y, r);
+        if (hit && !a.hits.has(hit.id)) { a.hits.add(hit.id); changed = true; }
       }
       if (changed) invalidate();
       return;
@@ -2139,18 +2523,26 @@
     return a.pts;
   }
 
-  // 그 점의 맨 앞 레이어 (최상위 노드)
-  function topNodeAt(list, wx, wy) {
-    const tol = 10 / board.view.s;
-    for (let i = list.length - 1; i >= 0; i--) {
-      const n = list[i];
-      if (!n.visible) continue;
-      const leaves = leavesOf(n, [], true);
-      for (let j = leaves.length - 1; j >= 0; j--) {
-        if (leafNearSegment(leaves[j], wx, wy, wx, wy, tol)) return n;
+  // 영역을 덮는 레이어(흐림, 자동 대칭)는 그 아래 그림을 가리지 않도록 마지막에 고름
+  const OVERLAY_KINDS = new Set(['blur', 'symmetry']);
+
+  function topLeafAt(leaves, wx, wy, tol) {
+    for (const overlay of [false, true]) {
+      for (let i = leaves.length - 1; i >= 0; i--) {
+        const n = leaves[i];
+        if (OVERLAY_KINDS.has(n.kind) !== overlay) continue;
+        if (leafNearSegment(n, wx, wy, wx, wy, tol)) return n;
       }
     }
     return null;
+  }
+
+  // 그 점의 맨 앞 레이어 (최상위 노드)
+  function topNodeAt(list, wx, wy) {
+    const leaves = [];
+    for (const n of list) leavesOf(n, leaves, true);
+    const hit = topLeafAt(leaves, wx, wy, 10 / board.view.s);
+    return hit ? pathTo(hit.id)[0] : null;
   }
 
   function finishLasso() {
@@ -2302,7 +2694,8 @@
     for (const id of selection) replaceNode(id, n => transformNode(n, m));
     const [cx, cy] = Mat.apply(m, selBox.cx, selBox.cy);
     const k = Math.hypot(m[0], m[1]);
-    selBox = { cx, cy, hw: selBox.hw * k, hh: selBox.hh * k, angle: selBox.angle + Math.atan2(m[1], m[0]) };
+    const mirrored = m[0] * m[3] - m[1] * m[2] < 0;
+    selBox = { cx, cy, hw: selBox.hw * k, hh: selBox.hh * k, angle: mirrored ? selBox.angle : selBox.angle + Math.atan2(m[1], m[0]) };
     strokesChanged();
   }
 
@@ -2329,6 +2722,14 @@
     selection = new Set();
     selBox = null;
     strokesChanged();
+  }
+
+  // 좌우 / 상하 반전 (선택 상자의 축 기준)
+  function flipSelection(horizontal) {
+    if (!requireSelection()) return;
+    if (!selBox) selBox = computeBox();
+    const phi = selBox.angle + (horizontal ? Math.PI / 2 : 0);
+    applyTransform(Mat.reflectAbout(phi, selBox.cx, selBox.cy));
   }
 
   function rotateSelection90() {
@@ -2436,6 +2837,8 @@
   const ACTIONS = {
     copy: copySelection,
     rotate: rotateSelection90,
+    flipx: () => flipSelection(true),
+    flipy: () => flipSelection(false),
     group: groupSelection,
     ungroup: ungroupSelection,
     delete: deleteSelection,
@@ -2576,7 +2979,7 @@
     const m = Mat.translate(round1(pasteAt[0] - (x0 + x1) / 2), round1(pasteAt[1] - (y0 + y1) / 2));
     const placed = nodes.map(n => transformNode(n, m));
     checkpoint();
-    board.layers.push(...placed);
+    targetList().push(...placed);
     selection = new Set(placed.map(n => n.id));
     selBox = computeBox();
     closePastePopup();
@@ -2798,6 +3201,10 @@
       case 'guide': return '가상 선 · 저장 안 됨';
       case 'blur': return `흐림 · 강도 ${Math.round(n.strength)}`;
       case 'image': return '이미지';
+      case 'symmetry': {
+        const axes = [n.v != null ? '세로 축' : '', n.h != null ? '가로 축' : ''].filter(Boolean).join('+') || '축 없음';
+        return `자동 대칭 · ${axes}`;
+      }
       default: return `${(PEN[n.pen] || PEN.basic).label} · ${Math.round(n.size)}px${n.erase ? ' · 지움' : ''}`;
     }
   }
@@ -2830,6 +3237,12 @@
     const name = document.createElement('div');
     name.className = 'layer-name';
     name.textContent = n.name;
+    if (n.id === board.autoGroupId) {
+      const tag = document.createElement('span');
+      tag.className = 'auto-tag';
+      tag.textContent = '자동';
+      name.appendChild(tag);
+    }
     const meta = document.createElement('div');
     meta.className = 'layer-meta';
     if (isGroup) {
@@ -2840,7 +3253,7 @@
     } else {
       const dot = document.createElement('span');
       dot.className = 'layer-color';
-      dot.style.background = n.kind === 'guide' ? GUIDE_COLOR : n.kind === 'blur' ? 'rgba(80,140,255,.5)' : (n.color || '#ccc');
+      dot.style.background = n.kind === 'guide' ? GUIDE_COLOR : n.kind === 'symmetry' ? SYM_COLOR : n.kind === 'blur' ? 'rgba(80,140,255,.5)' : (n.color || '#ccc');
       const label = document.createElement('span');
       label.textContent = leafMeta(n);
       meta.append(dot, label);
@@ -3117,6 +3530,25 @@
         markChanged();
       }, v => v + '%'));
       contextBar.appendChild(hint('밑그림을 톡 눌러 선택하면 옮기거나 돌릴 수 있어요 · 다운로드엔 안 나와요'));
+    } else if (t === 'symmetry') {
+      for (const [id, label] of [['rect', '사각형'], ['ellipse', '원'], ['polygon', '다각형']]) {
+        contextBar.appendChild(chip(label, tool.symShape === id, () => { finishDrafts(); tool.symShape = id; rebuild(); }));
+      }
+      contextBar.appendChild(sep());
+      const cur = currentSym();
+      const hasV = cur ? cur.v != null : tool.symV;
+      const hasH = cur ? cur.h != null : tool.symH;
+      contextBar.appendChild(chip('세로 축', hasV, () => toggleSymAxis('v')));
+      contextBar.appendChild(chip('가로 축', hasH, () => toggleSymAxis('h')));
+      contextBar.appendChild(sep());
+      if (polyDraft && polyDraft.pts.length) {
+        contextBar.appendChild(actionChip('닫기', () => commitPolygon(true), true));
+        contextBar.appendChild(actionChip('취소', () => { polyDraft = null; buildContextBar(); requestRender(); }));
+      } else if (cur) {
+        contextBar.appendChild(hint(`'${cur.name}' 편집 중 · 축 손잡이를 끌어 옮겨요 · 빈 곳을 끌면 새 영역`));
+      } else {
+        contextBar.appendChild(hint('영역을 그리면 이 레이어 위에 그린 것 중 영역 안의 것이 축으로 반전돼요 · 기존 영역은 톡 눌러 편집'));
+      }
     } else if (t === 'blur') {
       contextBar.appendChild(slider('강도', 1, 40, 1, tool.blurStrength, v => { tool.blurStrength = v; storage.set(TOOL_KEY, tool); }));
       contextBar.appendChild(hint('칠한 영역 아래에 있는 그림이 흐려져요'));
@@ -3171,7 +3603,7 @@
   }
 
   // ================= 키보드 =================
-  const HOTKEYS = { p: 'pen', m: 'magic', r: 'shape', c: 'curve', l: 'guide', f: 'fill', e: 'eraser', b: 'blur', s: 'select', v: 'paste', u: 'underlay' };
+  const HOTKEYS = { p: 'pen', m: 'magic', r: 'shape', c: 'curve', l: 'guide', f: 'fill', e: 'eraser', b: 'blur', s: 'select', v: 'paste', u: 'underlay', y: 'symmetry' };
 
   window.addEventListener('keydown', e => {
     if (e.key === 'Shift') shiftDown = true;

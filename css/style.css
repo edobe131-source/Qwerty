@@ -809,3 +809,47 @@ button { touch-action: manipulation; cursor: pointer; }
   .selection-bar span:not(.sel-count) { display: none; }
   .layers { position: absolute; right: 0; top: 0; bottom: 0; width: min(260px, 80vw); box-shadow: var(--shadow); z-index: 3; }
 }
+
+/* 자동 그룹 */
+.layers-head { gap: 8px; align-items: center; }
+.layers-head .layer-count { margin-right: auto; }
+.auto-group-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-2);
+}
+.auto-group-btn .ico { width: 16px; height: 16px; }
+.auto-group-btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.auto-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  vertical-align: 2px;
+}
+.auto-badge {
+  position: absolute;
+  left: 16px;
+  top: 52px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: var(--shadow);
+  z-index: 2;
+}
+.stage[data-tool="symmetry"] #board { cursor: crosshair; }

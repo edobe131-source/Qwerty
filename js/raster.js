@@ -162,13 +162,15 @@ window.Raster = (() => {
     const a = rdp(loop.slice(0, far * 2 + 2), eps);
     const b = rdp([...loop.slice(far * 2), loop[0], loop[1]], eps);
     const pts = [...a.slice(0, -2), ...b.slice(0, -2)];
-    // Chaikin 한 번
+    // Chaikin 한 번 (모서리를 깎는 길이는 1px 까지만: 계단은 다듬고 뾰족한 모서리는 유지)
     const out = [];
     const m = pts.length / 2;
     for (let i = 0; i < m; i++) {
       const x0 = pts[i * 2], y0 = pts[i * 2 + 1];
       const x1 = pts[((i + 1) % m) * 2], y1 = pts[((i + 1) % m) * 2 + 1];
-      out.push(0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1, 0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1);
+      const len = Math.hypot(x1 - x0, y1 - y0) || 1;
+      const t = Math.min(0.25, 1 / len);
+      out.push(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, x1 - (x1 - x0) * t, y1 - (y1 - y0) * t);
     }
     return out;
   }
