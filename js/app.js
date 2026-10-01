@@ -3658,6 +3658,10 @@
   }
 
   // ================= 시작 =================
+  // 화면에 버전을 보여 줘서 태블릿이 최신 코드를 받았는지 확인할 수 있게 함
+  // (고칠 때마다 index.html 의 ?v= 값과 함께 올림)
+  const APP_VERSION = '2026.10.01b';
+  $('#app-version').textContent = 'v' + APP_VERSION;
   showScreen('home');
   renderHome();
 })();

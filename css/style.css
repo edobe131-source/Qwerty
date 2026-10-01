@@ -853,3 +853,5 @@ button { touch-action: manipulation; cursor: pointer; }
   z-index: 2;
 }
 .stage[data-tool="symmetry"] #board { cursor: crosshair; }
+
+.app-version { margin-left: 4px; font-size: 12px; font-weight: 600; color: var(--text-2); }
